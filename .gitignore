@@ -1,0 +1,10 @@
+*.py[co]
+__pycache__/
+
+venv/
+
+*.egg-info/
+dist/
+build/
+
+tests/data/
