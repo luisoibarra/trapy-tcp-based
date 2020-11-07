@@ -47,4 +47,4 @@ def close(conn: Conn):
     """
     termina la conexión.
     """
-    pass
+    TCP.close_connection(conn)

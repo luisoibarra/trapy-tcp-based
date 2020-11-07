@@ -43,17 +43,27 @@ class TCPPackage:
 
 class Sender:
     
+    DEFAULT_TIMEOUT = 1
+    DEFAULT_WINDOW_SIZE = 1
+    
+    def __init__(self, *args, **kwargs):
+        self.executor = ThreadPoolExecutor(max_workers=1)
+        self.send_sock = ut.get_raw_socket()
+    
+    def no_ack_send(self, packages:list):
+        for pkg in packages:
+            self.send_sock.sendto(pkg.to_bytes(), (pkg.dest_host, pkg.dest_port))
+    
     def send(self, packets:list, seq_number:int, **kwargs) -> Future:
         self.to_send = packets
         self.acks = []
         self.base = 0
         self.base_seq = seq_number
-        self.send_sock = ut.get_raw_socket()
-        self.window_size = kwargs.get('window_size',1)
+        self.window_size = kwargs.get('window_size',self.DEFAULT_WINDOW_SIZE)
         self.next_to_send = 0
-        self.timer = Timer(kwargs.get('timeout',0.5))
-        sending_future = ThreadPoolExecutor(max_workers=1)
-        return sending_future.submit(self._send)
+        self.timer = Timer(kwargs.get('timeout',self.DEFAULT_TIMEOUT))
+        self.sender_task = self.executor.submit(self._send)
+        return self.sender_task
     
     def _send(self):
         while self.base < len(self.to_send):
@@ -79,8 +89,15 @@ class Sender:
     def ack_package(self, ack:int):
         ack = ack - self.base_seq
         self.base = max(ack, self.base)
-        if ack == self.base - 1:
+        if ack == self.base:# - 1:
             self.timer.stop()
+
+    def close(self):
+        timer = Timer(10)
+        timer.start()
+        while not timer.timeout() and self.sender_task and self.sender_task.running():
+            time.sleep(0.5)
+        self.executor.shutdown(wait=False)
 
 class Conn:
     """
@@ -92,38 +109,48 @@ class Conn:
         self.local_port = port
         
         self.in_buffer = []
-        # self.out_buffer = [] # TODO DEPRECATED
         self.seq_number = 0 # random.randint(0,(1<<32)-1)
-        self.base_number = None
-        self.window_size = None
         
         self.sock = ut.get_raw_socket()
-        self.recv_thread = Thread(target=self.conn_run)
+        self.recv_executor = ThreadPoolExecutor(max_workers=1)
+        self.recv_task = None
         self.sender = Sender()
         self.sender_task = None
+        
+        self.__running = False
 
     def add_package(self, package:TCPPackage):
         """
         Add packages to the connection in buffer 
         """
         self.in_buffer.append(package)
-        
+    
+    @property
+    def is_running(self):
+        return self.recv_task and self.recv_task.running()
+    
     def start(self):
         """
         Start current connection
         """
-        self.recv_thread.start()
+        self.__running = True
+        self.recv_task = self.recv_executor.submit(self.conn_run)
   
     def conn_run(self):
-        while True:
+        while self.__running:
             package = self._recv()
+            if package.fin_flag:
+                self.handle_fin_package(package)
             if package.rst_flag:
                 self.handle_rst_package(package)
             if package.syn_flag:
                 self.handle_syn_package(package)
             if package.ack_flag:
                 self.handle_ack_package(package)
-  
+
+    def handle_fin_package(self, package:TCPPackage):
+        raise NotImplementedError()
+    
     def handle_syn_package(self, package:TCPPackage):
         raise NotImplementedError()
         
@@ -141,50 +168,32 @@ class Conn:
         return number
        
     def _recv(self):
-        while True:
+        while self.__running:
             if self.in_buffer:
                 return self.in_buffer.pop(0)
     
-    def _send(self, send_package:TCPPackage):
-        # self.out_buffer.append(send_package)
-        self.sender_task = self.sender.send([send_package], self.seq_number)
+    def _send(self, send_package:TCPPackage, need_ack=True):
+        """
+        Send the `send_package`  
+        if `need_ack` then its sended in a reliable way else its just sended
+        """
+        if need_ack:
+            self.sender_task = self.sender.send([send_package], self.seq_number)
+        else:
+            self.sender.no_ack_send([send_package])
 
-    # TODO DEPREATED #
-    def _remove_acked_packages(self, ack:int):
-        """
-        Remove the acked packages from `out_buffer`  
-        `ack`: package ack number
-        """
-        if ack < self.base_number:
-            if self.base_number > self.seq_number and ack < self.seq_number:
-                # acking a package that started from 0
-                self._remove_acked_packages((1<<32)-1)
-            else:
-                # acking an invalid pkg 
-                return
-            
-        # From here self.base_number <= self.seq_number
-        if ack > self.seq_number:
-            # acking not sended pkg
-            return
+    def _release_resources(self):
+        self.sender.close()
+        TCP.remove_connection(self)
+        self.__running = False
+        self.recv_executor.shutdown()
         
-        to_remove = []
-        for pkg in self.out_buffer:
-            if pkg.seq_number <= ack:
-                to_remove.append(pkg)
-        
-        for pkg in to_remove:
-            self.out_buffer.remove(pkg)
-            
-        self.base_number = ut.next_number(ack)
-    def conn_send(self):
-        while True:
-            if self.out_buffer:
-                while self.out_buffer:
-                    self.sock.sendto(send_package.to_bytes(),(send_package.dest_host, send_package.dest_port))
-                    time.sleep(1)             
-    # END DEPRECATED#
-            
+    def close(self):
+        """
+        Start the closing stage of the connection 
+        """
+        raise NotImplementedError()
+    
 class ConnException(Exception):
     """
     Base Connection Exception
@@ -200,9 +209,11 @@ class TCPConn(Conn):
         self.dest_host = None
         self.dest_port = None
         self.connected = False
-   
+        self.send_fin = False
+        self.responded_fin = False
+
     def handle_rst_package(self, package: TCPPackage):
-        raise ConnException(f"Connection doesnt exist {package.dest_host}:{package.dest_port}")
+        pass
    
     # Handshake    
     def init_connection(self, address:str):
@@ -238,13 +249,39 @@ class TCPConn(Conn):
             response.ack_number = ut.next_number(server_package.seq_number)
             
             # Send package
-            self._send(response)
+            self._send(response, False)
             
             # Update connection state
             TCP.remove_connection(self)
             self.dest_port = conn_port
             TCP.add_connection(self)
             self.connected = True
+    ##
+    
+    # End Connection
+    def handle_fin_package(self, package:TCPPackage):
+        if not self.send_fin:
+            # fin received from other endpoint
+            
+            # Send fin
+            fin_package = ut.PacketInfo(self.local_host, self.dest_host, self.local_port,
+                                        self.dest_port, self._use_seq_number(), 0, 0, 
+                                        ut.PacketFlags(False, False, False, True))
+            self.responded_fin = True
+            self._send(TCPPackage(b'',fin_package))
+            self._release_resources()
+        else:
+            # fin received from other endpoint that received this peer fin package 
+            # import time
+            # time.sleep(15) # Waiting 
+            self._release_resources()
+    
+    def close(self):
+        fin_package = ut.PacketInfo(self.local_host, self.dest_host, self.local_port,
+                                    self.dest_port, self._use_seq_number(), 0, 0, 
+                                    ut.PacketFlags(False, False, False, True))
+        self.send_fin = True
+        self._send(TCPPackage(b'',fin_package))
     ##
 
 class TCPConnServer(Conn):
@@ -260,6 +297,9 @@ class TCPConnServer(Conn):
     
     def handle_rst_package(self, package:TCPPackage):
         self.pending_ack_conn.pop((package.source_host, package.source_port),None)
+    
+    def handle_fin_package(sef, package:TCPPackage):
+        pass
     
     # Handshake   
     def handle_syn_package(self, package:TCPPackage):
@@ -279,6 +319,7 @@ class TCPConnServer(Conn):
         key = package.source_host, package.source_port
         expected_ack, conn = self.pending_ack_conn.pop(key,(None,None))
         if conn and expected_ack == package.ack_number:
+            TCP.conn_dict.delete(self.local_host, self.local_port, package.source_host, package.source_port)
             conn.connected = True
             TCP.add_connection(conn)
             self.accepted_connections.append(conn)
@@ -288,7 +329,11 @@ class TCPConnServer(Conn):
         """
         Sends server synack package of the handshake initiated by `initial_package`
         """
-        # Create Connection
+        # Create This Connection
+        TCP.conn_dict.add(self.local_host, self.local_port, 
+                          initial_package.source_host, initial_package.source_port, self)
+        
+        # Create New Connection
         conn = TCPConn(initial_package.dest_host, self._get_port())
         conn.dest_host = initial_package.source_host
         conn.dest_port = initial_package.source_port
@@ -308,7 +353,10 @@ class TCPConnServer(Conn):
         
         # Send package
         self._send(send_package)
-         
+    
+    def close(self):
+        self._release_resources()
+        
     def _get_port(self):
         """
         Get port for new connection created by server
@@ -321,19 +369,21 @@ class ConnectionDict:
     its active Connection
     """
     def __init__(self, *args, **kwargs):
-        self.conn_dict = dict()
-        self.server_conn_dict = dict()
+        self.conn_dict = dict() # local_host, local_port, dest_host, dest_port -> conn
+        self.server_conn_dict = dict() # local_host, local_port -> conn
         
     def get(self, source_host:str, source_port:int, dest_host:str, dest_port:int) -> TCPConn:
         return self.conn_dict.get((source_host,source_port,dest_host,dest_port))
     
     def add(self, source_host:str, source_port:int, dest_host:str, dest_port:int, conn: TCPConn):
+        print("Connection added to dictionary",source_host,source_port,"->",dest_host,dest_port)
         self.conn_dict[source_host,source_port,dest_host,dest_port] = conn
         
     def delete(self, source_host:str, source_port:int, dest_host:str, dest_port:int):
         self.conn_dict.pop((source_host, source_port, dest_host, dest_port),None)
         
     def add_server(self, host:str, port:int, conn: TCPConnServer):
+        print("Server Connection added to dictionary:",host,port)
         self.server_conn_dict[host,port] = conn
     
     def get_server(self, host:str, port:int) -> TCPConnServer:
@@ -377,9 +427,9 @@ class TCP:
                 server_conn = self.conn_dict.get_server(package.dest_host,package.dest_port)
                 if conn:
                     conn.add_package(package)
-                if server_conn:
+                elif server_conn and package.syn_flag:
                     server_conn.add_package(package)
-                if not conn and not server_conn:
+                else:
                     self._send_no_conn_reply(package)
                 
     def start_server(self, address:str) -> TCPConnServer:
@@ -418,6 +468,12 @@ class TCP:
             TCP.conn_dict.delete_server(conn.local_host, conn.local_port)
         else:
             TCP.conn_dict.delete(conn.local_host, conn.local_port, conn.dest_host, conn.dest_port)
+    
+    @staticmethod
+    def close_connection(conn:Conn):
+        conn.close()
+        while conn.is_running:
+            pass
             
     def _can_queue_data(self, data:bytes):
         """
@@ -434,7 +490,9 @@ class TCP:
             package.swap_endpoints()
             # Set rst flag to notify that no conn exist with the package address
             package.rst_flag = True
-            package.seq_number, package.ack_number = package.ack_number, package.seq_number
+            package.ask_flag = True
+            package.fin_flag = False
+            package.seq_number, package.ack_number = package.ack_number, package.seq_number + 1
             s.sendto(package.to_bytes(),(package.source_host, package.source_port))
     
     def _get_address(self) -> (str,int):

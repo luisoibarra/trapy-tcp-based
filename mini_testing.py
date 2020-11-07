@@ -15,18 +15,23 @@ def server_test():
     # print(data_recv)
     # data_send_len = send(client_con, b'Hello sending data from server to client')
     # close(client_con)
-    # close(server)
+    # print("Client Server Closed")
+    close(server)
+    print("Server Closed")
     
 def client_test():
-    server_con = dial(address)
+    conn = dial(address)
     print("Client Done")
-    # data_send_len = send(server_con, b'Hello sending data from client to server')
-    # data_recv = recv(server_con, 2048)
+    # data_send_len = send(conn, b'Hello sending data from client to server')
+    # data_recv = recv(conn, 2048)
     # print(data_recv)
-    # close(server_con)
+    # close(conn)
+    # print("Client Closed")
 
 Thread(target=client_test).start()
 Thread(target=server_test()).start()
+while True:
+    pass
 
 def simple_transfer_test():
     host = '127.0.0.2'
