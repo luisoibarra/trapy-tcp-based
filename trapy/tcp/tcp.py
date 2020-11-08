@@ -5,6 +5,8 @@ import random
 import time
 from threading import Thread, Lock
 from concurrent.futures import ThreadPoolExecutor, Future
+import logging as log
+log.basicConfig(level=log.DEBUG, format='[%(asctime)s] %(levelname)s - %(message)s')
 
 class TCPPackage:
     
@@ -504,20 +506,22 @@ class ConnectionDict:
         return self.conn_dict.get((source_host,source_port,dest_host,dest_port))
     
     def add(self, source_host:str, source_port:int, dest_host:str, dest_port:int, conn: TCPConn):
-        print("Connection added to dictionary",source_host,source_port,"->",dest_host,dest_port)
+        log.info(f"Connection added: {source_host}:{source_port} -> {dest_host}:{dest_port}")
         self.conn_dict[source_host,source_port,dest_host,dest_port] = conn
         
     def delete(self, source_host:str, source_port:int, dest_host:str, dest_port:int):
+        log.info(f"Connection deleted: {source_host}:{source_port} -> {dest_host}:{dest_port}")
         self.conn_dict.pop((source_host, source_port, dest_host, dest_port),None)
         
     def add_server(self, host:str, port:int, conn: TCPConnServer):
-        print("Server Connection added to dictionary:",host,port)
+        log.info(f"Server Connection added: {host}:{port}")
         self.server_conn_dict[host,port] = conn
     
     def get_server(self, host:str, port:int) -> TCPConnServer:
         return self.server_conn_dict.get((host,port))
     
     def delete_server(self, host:str, port:int):
+        log.info(f"Server Connection deleted: {host}:{port}")
         self.server_conn_dict.pop((host, port),None)
 
 class TCP:
@@ -532,7 +536,7 @@ class TCP:
     
     def __init__(self, *args, **kwargs):
         # self.recv_sock.bind(('',0)) # Receive all connections 
-        self.recv_sock.bind(('127.0.0.2',0)) # Receive all connections 
+        self.recv_sock.bind(('127.0.0.2',0)) # TODO Non Production Bind Address
         self.recv_thread = Thread(target=self.demultiplex, daemon=True)
 
     def start(self):
@@ -633,4 +637,4 @@ class TCP:
         """
         return the initial address of a new TCPConn
         """
-        return ('127.0.0.2', random.randint(1024, (1<<16)-1))
+        return ('127.0.0.2', random.randint(1024, (1<<16)-1)) # TODO Change host and port generator 
