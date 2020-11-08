@@ -33,14 +33,14 @@ def send(conn: TCPConn, data: bytes) -> int:
     """
     envía los datos por la conexión y devuelve la cantidad de bytes enviados.
     """
-    pass
+    return conn.send(data)
 
 
 def recv(conn: TCPConn, length: int) -> bytes:
     """
-    bytes recibe a lo sumo length bytes almacenados en el buffer de la conexión.
+    bytes recibe a lo sumo `length` bytes almacenados en el buffer de la conexión.
     """
-    pass
+    return TCP.recv(conn, length)
 
 
 def close(conn: Conn):
