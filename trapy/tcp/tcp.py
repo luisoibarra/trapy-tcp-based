@@ -47,6 +47,10 @@ class TCPPackage:
     def swap_endpoints(self):
         self.source_port, self.source_host, self.dest_port, self.dest_host = self.dest_port, self.dest_host, self.source_port, self.source_host 
 
+    def _info(self):
+        flags = f"ACK:{self.ack_flag:d} RST:{self.rst_flag:d} SYN:{self.syn_flag:d} FIN:{self.fin_flag:d}"
+        return f"{self.source_host}:{self.source_port} -> {self.dest_host}:{self.dest_port} {flags}"
+
 class Sender:
     
     DEFAULT_TIMEOUT = 1
@@ -222,6 +226,7 @@ class Conn:
         Send the `send_package`  
         if `need_ack` then its sended in a reliable way else its just sended
         """
+        log.info(f"Package send scheduled: {send_package._info()}")
         if need_ack:
             self.sender_task = self.sender.send([send_package], self.seq_number)
         else:
@@ -554,6 +559,7 @@ class TCP:
             data = self.recv_sock.recv(2048)
             if self._can_queue_data(data):
                 package = TCPPackage(data)
+                log.info(f"TCP recv package: {package._info()}")
                 conn = self.conn_dict.get(package.dest_host, package.dest_port,
                                           package.source_host, package.source_port)
                 server_conn = self.conn_dict.get_server(package.dest_host,package.dest_port)
@@ -632,6 +638,7 @@ class TCP:
             package.fin_flag = False
             package.seq_number, package.ack_number = package.ack_number, package.seq_number + 1
             s.sendto(package.to_bytes(),(package.source_host, package.source_port))
+            log.info(f"RST Package sent to {(package.source_host, package.source_port)}")
     
     def _get_address(self) -> (str,int):
         """
