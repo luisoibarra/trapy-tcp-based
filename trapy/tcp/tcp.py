@@ -48,8 +48,10 @@ class TCPPackage:
         self.source_port, self.source_host, self.dest_port, self.dest_host = self.dest_port, self.dest_host, self.source_port, self.source_host 
 
     def _info(self):
-        flags = f"ACK:{self.ack_flag:d} RST:{self.rst_flag:d} SYN:{self.syn_flag:d} FIN:{self.fin_flag:d}"
-        return f"{self.source_host}:{self.source_port} -> {self.dest_host}:{self.dest_port} {flags}"
+        address = f"{self.source_host}:{self.source_port}->{self.dest_host}:{self.dest_port}" 
+        pkg_num = f"SEQ#:{self.seq_number} ACK#:{self.ack_number}"
+        flags = f"[{''.join(['ACK' if self.ack_flag else '', ' RST' if self.rst_flag else '', ' SYN' if self.syn_flag else '', ' FIN' if self.fin_flag else '' ])}]"
+        return f"{address} {pkg_num} {flags}"
 
 class Sender:
     
@@ -153,9 +155,10 @@ class Conn:
         self.local_port = port
         
         self.in_buffer = []
-        self.seq_number = 0 # random.randint(0,(1<<32)-1)
+        self.base_seq_number = 0 # random.randint(0,(1<<32)-1) # initial seq number
+        self.seq_number = self.base_seq_number # current seq_number
         
-        self.sock = ut.get_raw_socket()
+        self.sock = ut.get_raw_socket() # sending_socket
         self.recv_executor = ThreadPoolExecutor(max_workers=1)
         self.recv_task = None
         self.sender = Sender()
@@ -271,6 +274,8 @@ class TCPConn(Conn):
     """
     def __init__(self, host:str, port:int, *args, **kwargs):
         super().__init__(host, port, *args, **kwargs)
+        self.base_ack_number = None # Initial other side seq_number
+        self.ack_number = self.base_ack_number # expected byte from other side
         self.dest_host = None
         self.dest_port = None
         self.connected = False
@@ -358,6 +363,9 @@ class TCPConn(Conn):
         
     def handle_syn_package(self, package:TCPPackage):
         if not self.connected:
+            # Set other endpoint variables
+            self.base_ack_number = package.seq_number
+            self.ack_number = ut.next_number(package.seq_number)
             self.ack_server_handshake(package)
         
     def ack_server_handshake(self, server_package:TCPPackage):
@@ -374,7 +382,7 @@ class TCPConn(Conn):
             response.swap_endpoints()
             response.syn_flag = False
             response.seq_number = self._use_seq_number()
-            response.ack_number = ut.next_number(server_package.seq_number)
+            response.ack_number = self.ack_number
             
             # Send package
             self._send(response, False)
@@ -472,13 +480,15 @@ class TCPConnServer(Conn):
         conn = TCPConn(initial_package.dest_host, self._get_port())
         conn.dest_host = initial_package.source_host
         conn.dest_port = initial_package.source_port
+        conn.base_ack_number = initial_package.seq_number
+        conn.ack_number = initial_package.seq_number
         
         # Create package
         send_package = initial_package.copy()
         send_package.swap_endpoints()
         send_package.ack_flag = True
         send_package.ack_number = ut.next_number(initial_package.seq_number)
-        send_package.seq_number = self._use_seq_number()
+        send_package.seq_number = conn.seq_number
         
         # Attach the new created port number 
         send_package.data = ut.get_byte_of(conn.local_port, 2)
@@ -636,6 +646,7 @@ class TCP:
             package.rst_flag = True
             package.ask_flag = True
             package.fin_flag = False
+            package.syn_flag = False
             package.seq_number, package.ack_number = package.ack_number, package.seq_number + 1
             s.sendto(package.to_bytes(),(package.source_host, package.source_port))
             log.info(f"RST Package sent to {(package.source_host, package.source_port)}")
