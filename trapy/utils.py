@@ -52,7 +52,7 @@ def next_number(x:int, n:int=1):
 
 # NAMED TUPLES
 PacketFlags = namedtuple('PacketFlags',['ack','rst','syn','fin'])
-PacketInfo = namedtuple('PacketInfo',['source_host', 'dest_host', 'source_port', 'dest_port', 'seq_number', 'ack_number', 'checksum', 'flags'])
+PacketInfo = namedtuple('PacketInfo',['source_host', 'dest_host', 'source_port', 'dest_port', 'seq_number', 'ack_number', 'checksum', 'flags', 'urg_ptr'])
 
 def construct_ip_headers(source_host:str, dest_host:str) -> bytes:
     source_host = b''.join([get_byte_of(int(x)) for x in source_host.split('.')])
@@ -73,28 +73,25 @@ def deconstruct_ip_headers(data:bytes):
     dest_host = data[16:20]
     return data[20:], (".".join([str(int(x)) for x in source_host]), ".".join([str(int(x)) for x in dest_host])) 
 
-def construct_tcp_headers(source_port:int, dest_port:int, sequence_number:int, ack_number:int, checksum:int, flags:PacketFlags):
+def construct_tcp_headers(source_port:int, dest_port:int, sequence_number:int, ack_number:int, checksum:int, flags:PacketFlags, urg_ptr:int):
     header_length = 5
     header_length__unused_byte = get_byte_of(header_length << 4)
+
     flag_field = 0
-    flag_field |= flags.ack << 4
-    flag_field |= flags.rst << 2
-    flag_field |= flags.syn << 1
-    flag_field |= flags.fin << 0
-    
+    flag_field |= flags.ack << 4 | flags.rst << 2 | flags.syn << 1 | flags.fin << 0
     flag_field = get_byte_of(flag_field)
     
     tcp_header  = b''.join([get_byte_of(x,2) for x in [source_port, dest_port]]) # Source Port | Destination Port
     tcp_header += get_byte_of(sequence_number,4) # Sequence Number
     tcp_header += get_byte_of(ack_number,4) # Acknowledgement Number
     tcp_header += header_length__unused_byte + flag_field + b'\x71\x10' # Data Offset, Reserved, Flags | Window Size
-    tcp_header += get_byte_of(checksum,2) + b'\x00\x00' # Checksum | Urgent Pointer
+    tcp_header += get_byte_of(checksum,2) + get_byte_of(urg_ptr,2) # Checksum | Urgent Pointer
     return tcp_header
 
 def deconstruct_tcp_headers(data):
     """
     flags = ack,rst,syn,fin  
-    return data_without_tcp_headers, (source_port, dest_port, seq_number, ack_number, checksum, flags) 
+    return data_without_tcp_headers, (source_port, dest_port, seq_number, ack_number, checksum, flags, urg_ptr) 
     """
     source_port = get_int_of(data[:2])
     dest_port = get_int_of(data[2:4])
@@ -104,7 +101,8 @@ def deconstruct_tcp_headers(data):
     flags = get_int_of(data[13:14])
     ack,rst,syn,fin = 1<<4 & flags != 0, 1<<2 & flags != 0, 1<<1 & flags != 0, 1<<0 & flags != 0 
     checksum = get_int_of(data[16:18])
-    return data[20:], (source_port,dest_port,sequence_number,ack_number,checksum,(ack,rst,syn,fin))
+    urg_ptr = get_int_of(data[18:20])
+    return data[20:], (source_port,dest_port,sequence_number,ack_number,checksum,(ack,rst,syn,fin),urg_ptr)
 
 def construct_packet(data:bytes, packet_info:PacketInfo) -> bytes:
     ip_header = construct_ip_headers(packet_info.source_host, packet_info.dest_host)
@@ -113,12 +111,12 @@ def construct_packet(data:bytes, packet_info:PacketInfo) -> bytes:
 
 def deconstruct_packet(data):
     """
-    return data_without_headers, (source_host, dest_host, source_port, dest_port, seq_number, ack_number)
+    return data_without_headers, (source_host, dest_host, source_port, dest_port, seq_number, ack_number, checksum, flags, urg_ptr)
     """
     data, ip_info = deconstruct_ip_headers(data)
     data, tcp_info = deconstruct_tcp_headers(data)
     info = [x for x in ip_info + tcp_info]
-    info[-1] = PacketFlags(*info[-1])
+    info[7] = PacketFlags(*info[7]) # info[7] = flags
     info = PacketInfo(*info)
     return data, info
 
@@ -145,7 +143,7 @@ def demultiplexing_recv(sock:s.socket, port:int, size:int = 1024, timeout:float 
     
 # TEST CONSTRUCTION DECONSTRUCTION
 # data = b"THE DATA"
-# pack_info = PacketInfo('127.0.1.2', '127.127.127.127', 65000, 65001, 10, 11, 20, PacketFlags(True, False, True, False)) 
+# pack_info = PacketInfo('127.0.1.2', '127.127.127.127', 65000, 65001, 10, 11, 20, PacketFlags(True, False, True, False),30) 
 # packet = construct_packet(data, pack_info)
 # print(data)
 # print(pack_info)
