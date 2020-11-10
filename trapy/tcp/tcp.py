@@ -169,6 +169,8 @@ class Conn:
         self.sender = Sender()
         self.sender_task = None
         
+        self.state = TCP.CLOSED
+        
         self.__running = False
 
     def add_package(self, package:TCPPackage):
@@ -253,7 +255,7 @@ class Conn:
         self.sender.close()
         TCP.remove_connection(self)
         self.__running = False
-        self.connected = False
+        self.state = TCP.CLOSED
         self.recv_executor.shutdown()
     
     def _ack_package(self, package:TCPPackage):
@@ -283,6 +285,12 @@ class ConnException(Exception):
 class TCPConn(Conn):
     """
     Hold the non server connection state 
+        
+    Initiate Connection:
+    3-way handshake
+    
+    Close Connection:
+    3-way handshake
     """
     
     FIN_WAITING = 5 # Time to wait for connection to close
@@ -293,7 +301,6 @@ class TCPConn(Conn):
         self.ack_number = self.base_ack_number # expected byte from other side
         self.dest_host = None
         self.dest_port = None
-        self.connected = False
         self.sended_fin = None
         self.responded_fin = None
         self.in_package_data = dict() # seq_number -> data
@@ -309,13 +316,13 @@ class TCPConn(Conn):
     def handle_ack_package(self, package:TCPPackage):
         self._update_ack(package)
         super().handle_ack_package(package)
-        if self.responded_fin and package.seq_number >= self.responded_fin.ack_number: # if the responded_fin pkg was acked
+        if self.state == TCP.FINACK_SENT and package.seq_number >= self.responded_fin.ack_number: # if the responded_fin pkg was acked
             self._release_resources()
         elif self.heavy_sender_task and self.heavy_sender_task.running():
             self.heavy_sender.ack_package(package.ack_number)
     
     def handle_no_flag_package(self, package:TCPPackage):
-        if self.connected:
+        if self.state == TCP.CONNECTED:
             self.in_package_data[package.seq_number] = package.data
             self._ack_package(package)
 
@@ -378,10 +385,11 @@ class TCPConn(Conn):
         syn_package = TCPPackage(b'',ut.PacketInfo(self.local_host,self.dest_host,self.local_port,
                                                    self.dest_port, self._use_seq_number(), 0, 0, 
                                                    ut.PacketFlags(False, False, True, False),0))
+        self.state = TCP.SYN_SENT
         self._send(syn_package)
         
     def handle_syn_package(self, package:TCPPackage):
-        if not self.connected:
+        if self.state == TCP.SYN_SENT:
             # Set other endpoint variables
             self.base_ack_number = package.seq_number
             self.ack_number = ut.next_number(package.seq_number)
@@ -410,12 +418,12 @@ class TCPConn(Conn):
             TCP.remove_connection(self)
             self.dest_port = conn_port
             TCP.add_connection(self)
-            self.connected = True
+            self.state = TCP.CONNECTED
     ##
     
     # End Connection
     def handle_fin_package(self, package:TCPPackage):
-        if not self.sended_fin:
+        if self.state == TCP.CONNECTED or self.state == TCP.FINACK_SENT:
             # fin received from other endpoint
             
             # Send fin ack
@@ -423,14 +431,16 @@ class TCPConn(Conn):
                 self.responded_fin = ut.PacketInfo(self.local_host, self.dest_host, self.local_port,
                                             self.dest_port, self._use_seq_number(), self.ack_number, 0, 
                                             ut.PacketFlags(True, False, False, True),0)
+                self.state = TCP.FINACK_SENT
             self._send(TCPPackage(b'',self.responded_fin))
             
-        elif package.ack_flag:
+        elif self.state == TCP.FIN_SENT or self.state == TCP.FIN_WAIT and package.ack_flag:
             # fin received from other endpoint that received this peer fin package 
             # import time
             # time.sleep(15) # Waiting
             if not self.fin_timer.running():
                 self.fin_timer.start()
+                self.state = TCP.FIN_WAIT
                 self._ack_package(package)
             elif not self.fin_timer.timeout():
                 self._ack_package(package)
@@ -439,7 +449,7 @@ class TCPConn(Conn):
         """
         Start the closing process by sending a FIN pkg
         """
-        if self.connected:
+        if self.state == TCP.CONNECTED:
             self.sended_fin = ut.PacketInfo(self.local_host, self.dest_host, self.local_port,
                                         self.dest_port, self._use_seq_number(), self.ack_number, 0, 
                                         ut.PacketFlags(False, False, False, True),0)
@@ -472,9 +482,26 @@ class TCPConnServer(Conn):
     
     def __init__(self, host:str, port:int, *args, **kwargs):
         super().__init__(host, port, *args, **kwargs)
-        self.accepting = False
         self.accepted_connections = []
         self.pending_ack_conn = dict() # host,port -> expected_ack_number, TCPConn
+    
+    def start(self):
+        self.state = TCP.LISTEN
+        super().start()
+    
+    def accept(self):
+        if self.state == TCP.LISTEN:
+            self.state = TCP.ACCEPT
+            while not self.accepted_connections:
+                time.sleep(0.5) # TODO Timer?
+            
+            # Go back to previous state in case of not been changed
+            if self.state == TCP.ACCEPT:
+                self.state = TCP.LISTEN
+                
+            return self.accepted_connections.pop()
+        else:
+            raise ConnException("Server not listening")
     
     def handle_rst_package(self, package:TCPPackage):
         self.pending_ack_conn.pop((package.source_host, package.source_port),None)
@@ -487,7 +514,7 @@ class TCPConnServer(Conn):
     
     # Handshake   
     def handle_syn_package(self, package:TCPPackage):
-        if self.accepting:
+        if self.state == TCP.ACCEPT:
             key = package.source_host, package.source_port
             if key in self.pending_ack_conn:
                 # TODO The client resend initial syn package
@@ -506,7 +533,7 @@ class TCPConnServer(Conn):
         expected_ack, conn = self.pending_ack_conn.pop(key,(None,None))
         if conn and expected_ack == package.ack_number:
             TCP.conn_dict.delete(self.local_host, self.local_port, package.source_host, package.source_port)
-            conn.connected = True
+            conn.state = TCP.CONNECTED
             conn.seq_number = package.ack_number
             conn.ack_number = ut.next_number(package.seq_number)
             TCP.add_connection(conn)
@@ -527,6 +554,7 @@ class TCPConnServer(Conn):
         conn.dest_port = initial_package.source_port
         conn.base_ack_number = initial_package.seq_number
         conn.ack_number = initial_package.seq_number
+        conn.state = TCP.SYNACK_SENT
         
         # Create package
         send_package = self._build_synack_package(initial_package, conn.seq_number, conn.local_port)
@@ -594,6 +622,18 @@ class TCP:
     """
     Virtual Transport TCP Layer
     """
+    
+    # TCP Connection States
+    SYN_SENT = "SYN SENT" # Initial SYN package sent
+    SYNACK_SENT = "SYNACK SENT" # SYN package received and SYNACK package sent 
+    FIN_SENT = "FIN SENT" # FIN package sent
+    FINACK_SENT = "FINACK SENT" # FIN package received and FINACK package sent
+    FIN_WAIT = "FIN WAIT" # FINACK package received and acked, waiting in case of ACK package lost and retransmission of FINACK package occurs
+    CONNECTED = "CONNECTED" # Endpoint connected
+    LISTEN = "LISTEN" # Server listening for connections
+    ACCEPT = "ACCEPT" # Server accepting connections
+    CLOSED = "CLOSED" # Endpoint closed
+    
     # Socket that receive all packages
     recv_sock = ut.get_raw_socket()
     
@@ -650,7 +690,7 @@ class TCP:
         conn.start()
         TCP.add_connection(conn)
         conn.init_connection(address)
-        while not conn.connected:
+        while conn.state != TCP.CONNECTED:
             pass # TODO Timer?
         return conn
         
@@ -673,6 +713,14 @@ class TCP:
         conn.close()
         while conn.is_running:
             pass
+    
+    @staticmethod
+    def accept(conn:TCPConnServer):
+        return conn.accept()
+    
+    @staticmethod
+    def send(conn:TCPConn, data:bytes):
+        return conn.send(data)
     
     @staticmethod
     def recv(conn:TCPConn, length:int):

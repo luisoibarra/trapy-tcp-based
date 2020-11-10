@@ -7,19 +7,14 @@ def listen(address: str) -> TCPConnServer:
     """
     prepara una conexión que acepta los paquetes enviados a `address`.
     """
-    server = TCP_layer.start_server(address)
-    return server
+    return TCP_layer.start_server(address)
 
 
 def accept(conn: TCPConnServer) -> TCPConn:
     """
     espera por alguna petición de conexión utilizando un `conn` creado previamente con `listen`.
     """
-    conn.accepting = True
-    while not conn.accepted_connections:
-        pass # TODO Timer?
-    conn.accepting = False
-    return conn.accepted_connections.pop()
+    return TCP.accept(conn)
 
 
 def dial(address:str) -> TCPConn:
@@ -33,7 +28,7 @@ def send(conn: TCPConn, data: bytes) -> int:
     """
     envía los datos por la conexión y devuelve la cantidad de bytes enviados.
     """
-    return conn.send(data)
+    return TCP.send(conn,data)
 
 
 def recv(conn: TCPConn, length: int) -> bytes:
