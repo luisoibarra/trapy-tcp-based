@@ -420,7 +420,6 @@ class TCPConn(Conn):
             
             # Send fin ack
             if not self.responded_fin:
-                self.ack_number = max(self.ack_number, ut.next_number(package.seq_number))
                 self.responded_fin = ut.PacketInfo(self.local_host, self.dest_host, self.local_port,
                                             self.dest_port, self._use_seq_number(), self.ack_number, 0, 
                                             ut.PacketFlags(True, False, False, True),0)
@@ -432,7 +431,6 @@ class TCPConn(Conn):
             # time.sleep(15) # Waiting
             if not self.fin_timer.running():
                 self.fin_timer.start()
-                self.ack_number = ut.next_number(self.ack_number)
                 self._ack_package(package)
             elif not self.fin_timer.timeout():
                 self._ack_package(package)
@@ -456,7 +454,7 @@ class TCPConn(Conn):
         Update the ack given a package
         """
         if self.ack_number == package.seq_number:
-            self.ack_number += len(package.data)
+            self.ack_number = ut.next_number(self.ack_number,len(package.data) if package.data else 1) 
 
     def _watch_function(self):
         super()._watch_function()
