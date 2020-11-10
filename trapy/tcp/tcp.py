@@ -209,7 +209,7 @@ class Conn:
         raise NotImplementedError()
         
     def handle_ack_package(self, package:TCPPackage):
-        if self.sender_task and self.sender_task.running():
+        if self.sender_task: #and self.sender_task.running(): # A Pending state also exist
             self.sender.ack_package(package.ack_number)
     
     def handle_rst_package(self, package:TCPPackage):
@@ -225,8 +225,15 @@ class Conn:
    
     def _recv(self):
         while self.__running:
+            self._watch_function()
             if self.in_buffer:
                 return self.in_buffer.pop(0)
+    
+    def _watch_function(self):
+        """
+        Function called to verify time events
+        """
+        pass
     
     def _send(self, send_package:TCPPackage, need_ack=True):
         """
@@ -246,18 +253,19 @@ class Conn:
         self.sender.close()
         TCP.remove_connection(self)
         self.__running = False
+        self.connected = False
         self.recv_executor.shutdown()
     
     def _ack_package(self, package:TCPPackage):
         """
         Send an ack package of `package`
-        """        
+        """
         ack_pkg = package.copy()
         ack_pkg.swap_endpoints()
         ack_pkg.ack_flag = True
         ack_pkg.data = b''
         ack_pkg.fin_flag = ack_pkg.syn_flag = ack_pkg.rst_flag = False
-        ack_pkg.ack_number, ack_pkg.seq_number = ut.next_number(ack_pkg.seq_number), ack_pkg.ack_number
+        ack_pkg.ack_number, ack_pkg.seq_number = self.ack_number, self.seq_number
         self._send(ack_pkg, False)
         
     def close(self):
@@ -276,6 +284,9 @@ class TCPConn(Conn):
     """
     Hold the non server connection state 
     """
+    
+    FIN_WAITING = 5 # Time to wait for connection to close
+    
     def __init__(self, host:str, port:int, *args, **kwargs):
         super().__init__(host, port, *args, **kwargs)
         self.base_ack_number = None # Initial other side seq_number
@@ -283,13 +294,14 @@ class TCPConn(Conn):
         self.dest_host = None
         self.dest_port = None
         self.connected = False
-        self.send_fin = False
-        self.responded_fin = False
+        self.sended_fin = None
+        self.responded_fin = None
         self.in_package_data = dict() # seq_number -> data
         self.dump_buffer = b''
         self.heavy_sender = Sender()
         self.heavy_sender_task = None
         self.builder = BatchPackageBuilder(self)
+        self.fin_timer = Timer(self.FIN_WAITING)
 
     def handle_rst_package(self, package: TCPPackage):
         pass
@@ -297,7 +309,9 @@ class TCPConn(Conn):
     def handle_ack_package(self, package:TCPPackage):
         self._update_ack(package)
         super().handle_ack_package(package)
-        if self.heavy_sender_task and self.heavy_sender_task.running():
+        if self.responded_fin and package.seq_number >= self.responded_fin.ack_number: # if the responded_fin pkg was acked
+            self._release_resources()
+        elif self.heavy_sender_task and self.heavy_sender_task.running():
             self.heavy_sender.ack_package(package.ack_number)
     
     def handle_no_flag_package(self, package:TCPPackage):
@@ -401,31 +415,40 @@ class TCPConn(Conn):
     
     # End Connection
     def handle_fin_package(self, package:TCPPackage):
-        if not self.send_fin:
+        if not self.sended_fin:
             # fin received from other endpoint
             
-            # Send fin
-            fin_package = ut.PacketInfo(self.local_host, self.dest_host, self.local_port,
-                                        self.dest_port, self._use_seq_number(), self.ack_number, 0, 
-                                        ut.PacketFlags(False, False, False, True),0)
-            self.responded_fin = True
-            self._send(TCPPackage(b'',fin_package))
-            self._release_resources()
-        else:
+            # Send fin ack
+            if not self.responded_fin:
+                self.ack_number = max(self.ack_number, ut.next_number(package.seq_number))
+                self.responded_fin = ut.PacketInfo(self.local_host, self.dest_host, self.local_port,
+                                            self.dest_port, self._use_seq_number(), self.ack_number, 0, 
+                                            ut.PacketFlags(True, False, False, True),0)
+            self._send(TCPPackage(b'',self.responded_fin))
+            
+        elif package.ack_flag:
             # fin received from other endpoint that received this peer fin package 
             # import time
-            # time.sleep(15) # Waiting 
-            self._release_resources()
+            # time.sleep(15) # Waiting
+            if not self.fin_timer.running():
+                self.fin_timer.start()
+                self.ack_number = ut.next_number(self.ack_number)
+                self._ack_package(package)
+            elif not self.fin_timer.timeout():
+                self._ack_package(package)
     
     def close(self):
         """
         Start the closing process by sending a FIN pkg
         """
-        fin_package = ut.PacketInfo(self.local_host, self.dest_host, self.local_port,
-                                    self.dest_port, self._use_seq_number(), self.ack_number, 0, 
-                                    ut.PacketFlags(False, False, False, True),0)
-        self.send_fin = True
-        self._send(TCPPackage(b'',fin_package))
+        if self.connected:
+            self.sended_fin = ut.PacketInfo(self.local_host, self.dest_host, self.local_port,
+                                        self.dest_port, self._use_seq_number(), self.ack_number, 0, 
+                                        ut.PacketFlags(False, False, False, True),0)
+            
+            self._send(TCPPackage(b'',self.sended_fin))
+        else:
+            self._release_resources()
     ##
     
     def _update_ack(self, package:TCPPackage):
@@ -434,6 +457,11 @@ class TCPConn(Conn):
         """
         if self.ack_number == package.seq_number:
             self.ack_number += len(package.data)
+
+    def _watch_function(self):
+        super()._watch_function()
+        if self.fin_timer.timeout():
+            self._release_resources()
     
     def _release_resources(self):
         self.heavy_sender.close()
