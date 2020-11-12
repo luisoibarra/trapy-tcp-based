@@ -59,6 +59,7 @@ class Sender:
     
     DEFAULT_TIMEOUT = 1
     DEFAULT_WINDOW_SIZE = 1
+    DEFAULT_PKG_SIZE = 1460
     
     def __init__(self, *args, **kwargs):
         self.executor = ThreadPoolExecutor(max_workers=1)
@@ -134,7 +135,7 @@ class BatchPackageBuilder:
     def __init__(self, conn:'TCPConn'):
         self.__conn = conn
     
-    def build_packages(self, data:bytes, max_pkg_size:int=10, max_amount:int=-1):
+    def build_packages(self, data:bytes, max_pkg_size:int=Sender.DEFAULT_PKG_SIZE, max_amount:int=-1):
         """
         Build a list of packages of sizes <= `max_pkg_size`  
         The length of the list is <= `max_amount` in case of `max_amount` > 0  
@@ -273,6 +274,7 @@ class Conn:
                                 self.seq_number, self.ack_number, 0, ut.PacketFlags(True, False, False, False),
                                 0)
         ack_pkg = TCPPackage(b'', ack_pkg)
+        log.info(f"ACK Sent {ack_pkg._info()}")
         self._send(ack_pkg, False)
         
     def close(self):
@@ -320,7 +322,8 @@ class TCPConn(Conn):
         pass
 
     def handle_ack_package(self, package:TCPPackage):
-        self._update_ack(package)
+        if self.state != TCP.CONNECTED:
+            self._update_ack(package)
         super().handle_ack_package(package)
         if self.state == TCP.FINACK_SENT and package.seq_number >= self.responded_fin.ack_number: # if the responded_fin pkg was acked
             self._release_resources()
