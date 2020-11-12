@@ -2,6 +2,26 @@ import struct
 import socket as s
 from collections import namedtuple
 
+def calculate_checksum(data:bytes):
+    """
+    Calculates the `data` checksum
+    """
+    checksum = 0
+    info = data
+    for i in range(0,len(info),2):
+        chunk = info[i:(i+2)]
+        if len(chunk) == 1:
+            chunk += b'\x00'
+        checksum = checksum ^ get_int_of(chunk)
+    return checksum
+
+def valid_checksum(data:bytes, checksum:int):
+    """
+    Returns if a `data` and its `checksum` match
+    """
+    calculated_checksum = calculate_checksum(data)
+    return not calculated_checksum ^ checksum
+
 def parse_address(address:str)->(str,int):
     host, port = address.split(':')
 
@@ -143,10 +163,13 @@ def demultiplexing_recv(sock:s.socket, port:int, size:int = 1024, timeout:float 
     
 # TEST CONSTRUCTION DECONSTRUCTION
 # data = b"THE DATA"
-# pack_info = PacketInfo('127.0.1.2', '127.127.127.127', 65000, 65001, 10, 11, 20, PacketFlags(True, False, True, False),30) 
+# pack_info = PacketInfo('127.0.1.2', '127.127.127.127', 65000, 65001, 10, 11, 0, PacketFlags(True, False, True, False),30) 
+# packet_0_checksum = construct_packet(data, pack_info)
+# pack_info = PacketInfo('127.0.1.2', '127.127.127.127', 65000, 65001, 10, 11, calculate_checksum(packet_0_checksum), PacketFlags(True, False, True, False),30) 
 # packet = construct_packet(data, pack_info)
 # print(data)
 # print(pack_info)
 # new_data, info = deconstruct_packet(packet)
 # print(new_data)
+# print("Checksum valid:", valid_checksum(packet, 0))
 # print(info)

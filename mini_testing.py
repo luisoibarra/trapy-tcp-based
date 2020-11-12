@@ -1,6 +1,6 @@
-# from trapy.udp_trapy.udp_trapy import *
-# from trapy.my_trapy.trapy import *
+# from trapy.socket_trapy import *
 from trapy.tcp.trapy import *
+from trapy.tcp.trapy import log
 import trapy.utils as ut 
 from threading import Thread
 import socket
@@ -13,12 +13,24 @@ def server_test():
     log.info("Server Done")
     data_recv = recv(client_con, 2048)
     log.info(f"Info received: {data_recv}")
-    data_send_len = send(client_con, b'Hello sending data from server to client')
-    log.info(f"Server Sended: {data_send_len} of {len(data)}")
-    close(client_con)
-    log.info("Client Server Closed")
     close(server)
     log.info("Server Closed")
+    data_sent = b'123456789a123456789b123456789c123456789d123456789e'
+    data_send_len = send(client_con, data_sent)
+    log.info(f"Server Sended: {data_send_len} of {len(data_sent)}")
+    # data_sent = b'123456789a123456789b123456789c123456789d123456789e'
+    # data_send_len = send(client_con, data_sent)
+    # log.info(f"Server Sended: {data_send_len} of {len(data_sent)}")
+    
+    # data_recv = recv(client_con, 2048)
+    # log.info(f"Info received: {data_recv}")
+    # while data_recv:
+    #     data_recv = recv(conn, 2048)
+    #     log.info(f"Info received: {data_recv}")
+    
+    
+    # close(client_con)
+    # log.info("Client Server Closed")
     
 def client_test():
     conn = dial(address)
@@ -26,15 +38,27 @@ def client_test():
     data = b'Hello sending data from client to server'
     data_send_len = send(conn, data)
     log.info(f"Client Sended: {data_send_len} of {len(data)}")
+    
     data_recv = recv(conn, 2048)
     log.info(f"Info received: {data_recv}")
+    # while data_recv:
+    #     data_recv = recv(conn, 2048)
+    #     log.info(f"Info received: {data_recv}")
+    # data_sent = b'123456789a123456789b123456789c123456789d123456789e'
+    # data_send_len = send(conn, data_sent)
+    # log.info(f"Server Sended: {data_send_len} of {len(data_sent)}")
+    
+    
     close(conn)
     log.info("Client Closed")
 
-Thread(target=client_test).start()
-Thread(target=server_test()).start()
-while True:
-    pass
+def test_1():
+    Thread(target=client_test, name='Client').start()
+    Thread(target=server_test, name='Server').start()
+    while True:
+        pass
+
+# test_1()
 
 def simple_transfer_test():
     host = '127.0.0.2'
@@ -60,3 +84,76 @@ def listen_all():
         print(s.recvfrom(2048))
 
 # listen_all()
+
+import serve_file.__main__ as sf
+def serve_file_client(server_ip, data_rcv_file):
+    sf.make_client(server_ip, data_rcv_file)
+
+def serve_file_server(server_ip, file_to_send, chunk_size):
+    sf.make_server(server_ip, file_to_send, chunk_size)
+
+def test_2():
+    Thread(target=serve_file_server, args=(address, 'sent.txt',100), name='Server').start()
+    Thread(target=serve_file_client, args=(address, 'recv.txt'), name='Client').start()
+    while True:
+        pass
+
+# test_2()
+
+def my_send_data():
+    conn = dial(address)
+    data = b"123456789a123456789b123456789c123456789d123456789e123456789f123456789g"
+    size = 10
+    while data:
+        pkg, data = data[:size], data[size:]
+        len_send = send(conn, pkg)
+        log.info(f"Sent {pkg[:len_send]}")
+        data = pkg[len_send:] + data
+    close(conn)
+
+def my_recv_data():
+    server = listen(address)
+    conn = accept(server)
+    close(server)
+    data = b''
+    rcv_data = True
+    while rcv_data:
+        rcv_data = recv(conn, 1)
+        log.info(f"Received {rcv_data}")
+        data += rcv_data
+    log.info(f"Final data {data}")
+    close(conn)
+
+def test_3():
+    Thread(target=my_recv_data, name='Server').start()
+    Thread(target=my_send_data, name='Client').start()
+    while True:
+        pass
+
+test_3()
+
+def tcp_client():
+    sock = s.socket()
+    sock.connect(ut.parse_address(address))
+    sock.send(b"Hello")
+    while True:
+        pass
+
+def tcp_server():
+    sock = s.socket()
+    sock.bind(ut.parse_address(address))
+    sock.listen()
+    conn, _ = sock.accept()
+    data = True
+    while data:
+        data = conn.recv(1024)
+        print(data)
+        
+def test_tcp():
+    Thread(target=tcp_server, name='Server').start()
+    time.sleep(1)
+    Thread(target=tcp_client, name='Client').start()
+    while True:
+        pass
+
+# test_tcp()

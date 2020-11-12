@@ -10,14 +10,13 @@ log.basicConfig(level=log.DEBUG, format='[%(asctime)s] %(levelname)s - %(message
 
 class TCPPackage:
     
-    def __init__(self, data:bytes, info:ut.PacketInfo=None):
+    def __init__(self, data:bytes, info:ut.PacketInfo=None, checksum=False):
         if not info:
             data, info = ut.deconstruct_packet(data)
         self.dest_host = info.dest_host
         self.dest_port = info.dest_port
         self.source_host = info.source_host
         self.source_port = info.source_port
-        self.checksum = info.checksum
         self.seq_number = info.seq_number
         self.ack_number = info.ack_number
         self.ack_flag = info.flags.ack
@@ -26,17 +25,29 @@ class TCPPackage:
         self.rst_flag = info.flags.rst
         self.urg_ptr = info.urg_ptr
         self.data = data
+        # Checksum must be last
+        self.checksum = info.checksum 
+        if checksum: self.update_checksum()
     
-    def _get_packet(self)->ut.PacketInfo:
-        packet = ut.PacketInfo(self.source_host, self.dest_host, self.source_port,
-                        self.dest_port, self.seq_number, self.ack_number, self.checksum,
-                        ut.PacketFlags(self.ack_flag, self.rst_flag, self.syn_flag,self.fin_flag),
-                        self.urg_ptr)
-        return packet
-    
+    def _calculate_pkg_checksum(self):
+        last_checksum = self.checksum
+        self.checksum = 0
+        pkg_bytes = self.to_bytes()
+        checksum = ut.calculate_checksum(pkg_bytes)
+        self.checksum = last_checksum
+        return checksum
+
+    @property
+    def corrupted(self):
+        pkg_bytes = self.to_bytes()
+        return not ut.valid_checksum(pkg_bytes, 0)
+
     @property
     def no_flag(self)->bool:
         return not self.fin_flag and not self.ack_flag and not self.rst_flag and not self.syn_flag
+    
+    def update_checksum(self):
+        self.checksum = self._calculate_pkg_checksum()
     
     def to_bytes(self):
         packet = self._get_packet()
@@ -48,6 +59,13 @@ class TCPPackage:
 
     def swap_endpoints(self):
         self.source_port, self.source_host, self.dest_port, self.dest_host = self.dest_port, self.dest_host, self.source_port, self.source_host 
+
+    def _get_packet(self)->ut.PacketInfo:
+        packet = ut.PacketInfo(self.source_host, self.dest_host, self.source_port,
+                        self.dest_port, self.seq_number, self.ack_number, self.checksum,
+                        ut.PacketFlags(self.ack_flag, self.rst_flag, self.syn_flag,self.fin_flag),
+                        self.urg_ptr)
+        return packet
 
     def _info(self):
         address = f"{self.source_host}:{self.source_port}->{self.dest_host}:{self.dest_port}" 
@@ -79,6 +97,7 @@ class Sender:
         self.next_to_send = self.base
         self.timer = Timer(kwargs.get('timeout',self.DEFAULT_TIMEOUT))
         self.__running = True
+        self.finished = False
         self.sender_task = self.executor.submit(self._send)
         return self.sender_task
     
@@ -102,6 +121,7 @@ class Sender:
             else:
                 self.base = self.next_to_send
                 self.window_size = min(self.window_size, len(self.to_send) - self.base)
+        self.finished = True
 
     def ack_package(self, ack:int):
         for i, pkg in enumerate(self.to_send[self.base:], self.base):
@@ -148,7 +168,7 @@ class BatchPackageBuilder:
             info = ut.PacketInfo(self.__conn.local_host,self.__conn.dest_host,self.__conn.local_port,
                                 self.__conn.dest_port, self.__conn._use_seq_number(len(pkg)),self.__conn.ack_number,0,
                                 ut.PacketFlags(False, False, False, False),0)
-            package = TCPPackage(pkg, info)
+            package = TCPPackage(pkg, info, checksum=True)
             packages.append(package)
         
         return packages, data
@@ -196,6 +216,8 @@ class Conn:
     def conn_run(self):
         while self.__running:
             package = self._recv()
+            if package.corrupted:
+                continue
             if package.ack_flag:
                 self.handle_ack_package(package)
             if package.fin_flag:
@@ -268,7 +290,7 @@ class Conn:
         ack_pkg = ut.PacketInfo(self.local_host, self.dest_host, self.local_port, self.dest_port,
                                 self.seq_number, self.ack_number, 0, ut.PacketFlags(True, False, False, False),
                                 0)
-        ack_pkg = TCPPackage(b'', ack_pkg)
+        ack_pkg = TCPPackage(b'', ack_pkg, True)
         log.info(f"ACK Sent {ack_pkg._info()}")
         self._send(ack_pkg, False)
         
@@ -309,7 +331,6 @@ class TCPConn(Conn):
         self.in_package_data = dict() # seq_number -> data
         self.dump_buffer = b''
         self.heavy_sender = Sender()
-        self.heavy_sender_task = None
         self.builder = BatchPackageBuilder(self)
         self.fin_timer = Timer(self.FIN_WAITING)
 
@@ -322,7 +343,7 @@ class TCPConn(Conn):
         super().handle_ack_package(package)
         if self.state == TCP.FINACK_SENT and package.seq_number >= self.responded_fin.ack_number: # if the responded_fin pkg was acked
             self._release_resources()
-        elif self.heavy_sender_task and self.heavy_sender_task.running():
+        elif self.heavy_sender.sender_task and not self.heavy_sender.finished:
             self.heavy_sender.ack_package(package.ack_number)
     
     def handle_no_flag_package(self, package:TCPPackage):
@@ -333,13 +354,13 @@ class TCPConn(Conn):
 
     def send(self, data:bytes):
         init_length = len(data)
-        if self.heavy_sender_task and self.heavy_sender_task.running():
+        if self.heavy_sender.sender_task and not self.heavy_sender.finished:
             raise ConnException("Already sending data")
         while data:
             # Send all data <- TODO This is not necessary maybe can send only a piece
             packages, data = self.builder.build_packages(data)
-            self.heavy_sender_task = self.heavy_sender.send(packages, packages[0].seq_number)
-            while self.heavy_sender_task.running():
+            self.heavy_sender.sender_task = self.heavy_sender.send(packages, packages[0].seq_number)
+            while not self.heavy_sender.finished:
                 time.sleep(0.1)
         return init_length
     
@@ -358,7 +379,10 @@ class TCPConn(Conn):
                 self.to_dump += len(next_data)
                 to_dump += next_data
                 next_data = self.in_package_data.pop(self.to_dump,None)
-                
+            
+            if not to_dump: # Next package missing
+                return None
+            
             self.dump_buffer += to_dump
             to_dump, self.dump_buffer = self.dump_buffer[:length], self.dump_buffer[length:]
             return to_dump
@@ -375,7 +399,7 @@ class TCPConn(Conn):
         self.dest_port = port
         syn_package = TCPPackage(b'',ut.PacketInfo(self.local_host,self.dest_host,self.local_port,
                                                    self.dest_port, self._use_seq_number(), 0, 0, 
-                                                   ut.PacketFlags(False, False, True, False),0))
+                                                   ut.PacketFlags(False, False, True, False),0),True)
         self.state = TCP.SYN_SENT
         self._send(syn_package)
         
@@ -401,6 +425,7 @@ class TCPConn(Conn):
             response.syn_flag = False
             response.seq_number = self._use_seq_number()
             response.ack_number = self.ack_number
+            response.update_checksum()
             
             # Send package
             self._send(response, False)
@@ -426,7 +451,7 @@ class TCPConn(Conn):
                                             self.dest_port, self._use_seq_number(), self.ack_number, 0, 
                                             ut.PacketFlags(True, False, False, True),0)
                 self.state = TCP.FINACK_SENT
-            self._send(TCPPackage(b'',self.responded_fin))
+            self._send(TCPPackage(b'', self.responded_fin, True))
             
         elif self.state == TCP.FIN_SENT or self.state == TCP.FIN_WAIT and package.ack_flag:
             # fin received from other endpoint that received this peer fin package 
@@ -448,7 +473,7 @@ class TCPConn(Conn):
                                         self.dest_port, self._use_seq_number(), self.ack_number, 0, 
                                         ut.PacketFlags(False, False, False, True),0)
             self.state = TCP.FIN_SENT
-            self._send(TCPPackage(b'',self.sended_fin))
+            self._send(TCPPackage(b'',self.sended_fin, True))
         else:
             self._release_resources()
     ##
@@ -573,6 +598,8 @@ class TCPConnServer(Conn):
         
         # Attach the new created port number 
         send_package.urg_ptr = conn_port
+        
+        send_package.update_checksum()
         return send_package
         
     
@@ -638,7 +665,7 @@ class TCP:
     def __init__(self, *args, **kwargs):
         # self.recv_sock.bind(('',0)) # Receive all connections 
         self.recv_sock.bind(('127.0.0.2',0)) # TODO Non Production Bind Address
-        self.recv_thread = Thread(target=self.demultiplex, daemon=True)
+        self.recv_thread = Thread(target=self.demultiplex, name='TCP', daemon=True)
 
     def start(self):
         """
@@ -720,9 +747,9 @@ class TCP:
     @staticmethod
     def recv(conn:TCPConn, length:int):
         data = None
-        while data == None and conn.state == TCP.CONNECTED:
+        while data == None:
             data = conn.dump(length)
-            time.sleep(0.5)
+            time.sleep(0.1)
         return data
     
     def _can_queue_data(self, data:bytes):
