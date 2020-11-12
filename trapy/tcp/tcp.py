@@ -112,7 +112,7 @@ class Sender:
         else:
             # ACK number passed sending data threshold
             pkg = self.to_send[-1] 
-            if pkg.seq_number + len(pkg.data) + 1 <= ack:
+            if pkg.seq_number + len(pkg.data) <= ack:
                 self.base = len(self.to_send)
                 self.timer.stop()
 
@@ -151,11 +151,6 @@ class BatchPackageBuilder:
             package = TCPPackage(pkg, info)
             packages.append(package)
         
-        # Add last package package
-        info = ut.PacketInfo(self.__conn.local_host,self.__conn.dest_host,self.__conn.local_port,
-                            self.__conn.dest_port, self.__conn._use_seq_number(),self.__conn.ack_number,0,
-                            ut.PacketFlags(False, False, False, False),0)
-        packages.append(TCPPackage(b'',info))
         return packages, data
     
 class Conn:
@@ -357,21 +352,18 @@ class TCPConn(Conn):
             return data
         
         if self.in_package_data:
-            end_msg = False
             to_dump = b''
             next_data = self.in_package_data.pop(self.to_dump,None)
             while next_data != None:
                 self.to_dump += len(next_data)
                 to_dump += next_data
-                end_msg |= not bool(next_data)
-                if end_msg:
-                    self.to_dump += 1 # To ack the last empty message
-                    break
                 next_data = self.in_package_data.pop(self.to_dump,None)
                 
             self.dump_buffer += to_dump
             to_dump, self.dump_buffer = self.dump_buffer[:length], self.dump_buffer[length:]
             return to_dump
+        if self.state == TCP.CLOSED:
+            return b""
     
     # Handshake    
     def init_connection(self, address:str):
