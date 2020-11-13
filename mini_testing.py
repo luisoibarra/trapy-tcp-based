@@ -7,17 +7,20 @@ import socket
 
 address = '127.0.0.2:6500'
 
+TCP_layer = TCP()
+TCP_layer.start()
+
 def server_test():
     server = listen(address)
     client_con = accept(server)
     log.info("Server Done")
     data_recv = recv(client_con, 2048)
     log.info(f"Info received: {data_recv}")
-    close(server)
-    log.info("Server Closed")
-    data_sent = b'123456789a123456789b123456789c123456789d123456789e'
-    data_send_len = send(client_con, data_sent)
-    log.info(f"Server Sended: {data_send_len} of {len(data_sent)}")
+    # close(server)
+    # log.info("Server Closed")
+    # data_sent = b'123456789a123456789b123456789c123456789d123456789e'
+    # data_send_len = send(client_con, data_sent)
+    # log.info(f"Server Sended: {data_send_len} of {len(data_sent)}")
     # data_sent = b'123456789a123456789b123456789c123456789d123456789e'
     # data_send_len = send(client_con, data_sent)
     # log.info(f"Server Sended: {data_send_len} of {len(data_sent)}")
@@ -29,18 +32,18 @@ def server_test():
     #     log.info(f"Info received: {data_recv}")
     
     
-    # close(client_con)
-    # log.info("Client Server Closed")
+    close(client_con)
+    log.info("Client Server Closed")
     
 def client_test():
     conn = dial(address)
     log.info("Client Done")
-    data = b'Hello sending data from client to server'
+    data = b''
     data_send_len = send(conn, data)
     log.info(f"Client Sended: {data_send_len} of {len(data)}")
     
-    data_recv = recv(conn, 2048)
-    log.info(f"Info received: {data_recv}")
+    # data_recv = recv(conn, 2048)
+    # log.info(f"Info received: {data_recv}")
     # while data_recv:
     #     data_recv = recv(conn, 2048)
     #     log.info(f"Info received: {data_recv}")
@@ -49,8 +52,8 @@ def client_test():
     # log.info(f"Server Sended: {data_send_len} of {len(data_sent)}")
     
     
-    close(conn)
-    log.info("Client Closed")
+    # close(conn)
+    # log.info("Client Closed")
 
 def test_1():
     Thread(target=client_test, name='Client').start()
@@ -58,7 +61,7 @@ def test_1():
     while True:
         pass
 
-# test_1()
+test_1()
 
 def simple_transfer_test():
     host = '127.0.0.2'
@@ -130,12 +133,13 @@ def test_3():
     while True:
         pass
 
-test_3()
+# test_3()
 
 def tcp_client():
     sock = s.socket()
     sock.connect(ut.parse_address(address))
     sock.send(b"Hello")
+    sock.close()
     while True:
         pass
 
@@ -144,6 +148,7 @@ def tcp_server():
     sock.bind(ut.parse_address(address))
     sock.listen()
     conn, _ = sock.accept()
+    print(_)
     data = True
     while data:
         data = conn.recv(1024)
