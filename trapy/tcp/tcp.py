@@ -69,15 +69,15 @@ class TCPPackage:
 
     def _info(self):
         address = f"{self.source_host}:{self.source_port}->{self.dest_host}:{self.dest_port}" 
-        pkg_num = f"SEQ#:{self.seq_number} ACK#:{self.ack_number}"
+        pkg_num = f"SEQ:{self.seq_number} ACK:{self.ack_number}"
         flags = f"[{''.join(['ACK' if self.ack_flag else '', ' RST' if self.rst_flag else '', ' SYN' if self.syn_flag else '', ' FIN' if self.fin_flag else '' ])}]"
-        return f"{address} {pkg_num} {flags}"
+        return f"PKG {address} {pkg_num} {flags}"
 
 class Sender:
     
     DEFAULT_TIMEOUT = 1
-    DEFAULT_WINDOW_SIZE = 1
-    DEFAULT_PKG_SIZE = 1460
+    DEFAULT_WINDOW_SIZE = 10
+    DEFAULT_PKG_SIZE = 1
     
     def __init__(self, *args, **kwargs):
         self.executor = ThreadPoolExecutor(max_workers=1)
@@ -124,6 +124,9 @@ class Sender:
         self.finished = True
 
     def ack_package(self, ack:int):
+        if self.finished or self.base == len(self.to_send) or\
+            ack < self.to_send[self.base].seq_number:
+            return
         for i, pkg in enumerate(self.to_send[self.base:], self.base):
             if pkg.seq_number == ack:
                 self.base = i
@@ -354,7 +357,8 @@ class TCPConn(Conn):
     
     def handle_no_flag_package(self, package:TCPPackage):
         if self.state == TCP.CONNECTED:
-            self.in_package_data[package.seq_number] = package.data
+            if package.seq_number >= self.to_dump:
+                self.in_package_data[package.seq_number] = package.data
             self._update_ack(package)
             self._send_ack()
 
@@ -393,6 +397,7 @@ class TCPConn(Conn):
             
             self.dump_buffer += to_dump
             to_dump, self.dump_buffer = self.dump_buffer[:length], self.dump_buffer[length:]
+            log.info(f"DUMP {self._info()} {to_dump}")
             return to_dump
         if self.state == TCP.CLOSED:
             return b""
@@ -493,6 +498,9 @@ class TCPConn(Conn):
         else:
             self._release_resources()
     ##
+    
+    def _info(self) -> str:
+        return f"CON {self.local_host}:{self.local_port}->{self.dest_host}:{self.dest_port} SEQ:{self.seq_number} ACK:{self.ack_number}"
     
     def _update_ack(self, package:TCPPackage):
         """
