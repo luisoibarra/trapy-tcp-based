@@ -1,13 +1,11 @@
 from trapy.tcp.tcp import *
 
-TCP_layer = TCP()
-TCP_layer.start()
 
 def listen(address: str) -> TCPConnServer:
     """
     prepara una conexión que acepta los paquetes enviados a `address`.
     """
-    return TCP_layer.start_server(address)
+    return TCP.start_server(address)
 
 
 def accept(conn: TCPConnServer) -> TCPConn:
@@ -21,7 +19,7 @@ def dial(address:str) -> TCPConn:
     """
     establece conexión con el otro extremo indicado en `address` y devuelve la conexión.
     """
-    return TCP_layer.start_connection(address)
+    return TCP.start_connection(address)
 
 
 def send(conn: TCPConn, data: bytes) -> int:

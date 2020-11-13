@@ -145,6 +145,7 @@ class Sender:
         if self.timer:
             self.timer.stop()
         self.executor.shutdown()
+        self.send_sock.close()
 
 class BatchPackageBuilder:
     """
@@ -163,13 +164,15 @@ class BatchPackageBuilder:
         """
         max_amount = max_amount if max_amount > 0 else (1<<32)-1
         packages = []
-        while data and len(packages) < max_amount:
+        empty_pkg = data == b""            
+        while empty_pkg or data and len(packages) < max_amount:
             pkg, data = data[:max_pkg_size], data[max_pkg_size:]
             info = ut.PacketInfo(self.__conn.local_host,self.__conn.dest_host,self.__conn.local_port,
                                 self.__conn.dest_port, self.__conn._use_seq_number(len(pkg)),self.__conn.ack_number,0,
                                 ut.PacketFlags(False, False, False, False),0)
             package = TCPPackage(pkg, info, checksum=True)
             packages.append(package)
+            empty_pkg = False
         
         return packages, data
     
@@ -186,7 +189,6 @@ class Conn:
         self.base_seq_number = 0 # random.randint(0,(1<<32)-1) # initial seq number
         self.seq_number = self.base_seq_number # current seq_number
         
-        self.sock = ut.get_raw_socket() # sending_socket
         self.recv_executor = ThreadPoolExecutor(max_workers=1)
         self.recv_task = None
         self.sender = Sender()
@@ -360,12 +362,14 @@ class TCPConn(Conn):
         init_length = len(data)
         if self.heavy_sender.sender_task and not self.heavy_sender.finished:
             raise ConnException("Already sending data")
-        while data:
+        empty_pkg = data == b""
+        while empty_pkg or data:
             # Send all data <- TODO This is not necessary maybe can send only a piece
             packages, data = self.builder.build_packages(data)
             self.heavy_sender.sender_task = self.heavy_sender.send(packages, packages[0].seq_number)
             while not self.heavy_sender.finished:
                 time.sleep(0.1)
+            empty_pkg = False
         return init_length
     
     def dump(self, length:int):
@@ -377,14 +381,14 @@ class TCPConn(Conn):
             return data
         
         if self.in_package_data:
-            to_dump = b''
             next_data = self.in_package_data.pop(self.to_dump,None)
+            to_dump = None if next_data == None else b""
             while next_data != None:
-                self.to_dump += len(next_data)
+                self.to_dump += len(next_data) if next_data else 1
                 to_dump += next_data
                 next_data = self.in_package_data.pop(self.to_dump,None)
             
-            if not to_dump: # Next package missing
+            if to_dump == None: # Next package missing
                 return None
             
             self.dump_buffer += to_dump
@@ -657,19 +661,30 @@ class TCP:
         # self.recv_sock.bind(('',0)) # Receive all connections 
         self.recv_sock.bind(('127.0.0.2',0)) # TODO Non Production Bind Address
         self.recv_thread = Thread(target=self.demultiplex, name='TCP', daemon=True)
+        self.__running = False
 
     def start(self):
         """
         Start the TCP functionality.  
         Must be called before any other method
         """
+        self.__running = True
         self.recv_thread.start()
+        log.info("TCP Started")
+        
+    
+    def end(self):
+        self.close_all()
+        self.__running = False
+        self.recv_thread.join(2)
+        self.recv_sock.close()
+        log.info("TCP Closed")
     
     def demultiplex(self):
         """
         Redirects incoming packages to corresponding connection
         """
-        while True:
+        while self.__running:
             data = self.recv_sock.recv(2048)
             package = TCPPackage(data)
             if self._can_queue_data(package):
@@ -684,21 +699,23 @@ class TCP:
                 elif not package.rst_flag:
                     self._send_no_conn_reply(package)
                 
-    def start_server(self, address:str) -> TCPConnServer:
+    @staticmethod
+    def start_server(address:str) -> TCPConnServer:
         """
         return a working TCPConnServer binded to `address`
         """
         host, port = ut.parse_address(address)
         conn = TCPConnServer(host,port)
-        self.conn_dict.add_server(host, port, conn)
+        TCP.conn_dict.add_server(host, port, conn)
         conn.start()
         return conn
     
-    def start_connection(self, address:str) -> TCPConn:
+    @staticmethod
+    def start_connection(address:str) -> TCPConn:
         """
         return a TCPConn connected to address
         """
-        conn = TCPConn(*self._get_address())
+        conn = TCPConn(*TCP._get_address())
         conn.dest_host, conn.dest_port = ut.parse_address(address)
         conn.start()
         TCP.add_connection(conn)
@@ -768,7 +785,18 @@ class TCP:
             s.sendto(package.to_bytes(),(package.source_host, package.source_port))
             log.info(f"RST Package sent to {(package.source_host, package.source_port)}")
     
-    def _get_address(self) -> (str,int):
+    def close_all(self):
+        keys = [x for x in self.conn_dict.server_conn_dict]
+        for key in keys:
+            conn = self.conn_dict.server_conn_dict[key]
+            conn.close()
+        keys = [x for x in self.conn_dict.conn_dict]
+        for key in keys:
+            conn = self.conn_dict.conn_dict[key]
+            conn.close()
+    
+    @staticmethod
+    def _get_address() -> (str,int):
         """
         return the initial address of a new TCPConn
         """
