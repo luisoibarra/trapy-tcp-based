@@ -333,11 +333,15 @@ class TCPConn(Conn):
         self.heavy_sender = Sender()
         self.builder = BatchPackageBuilder(self)
         self.fin_timer = Timer(self.FIN_WAITING)
+        self._synack_package = None
+        self.__server = kwargs.get('server', None)
 
     def handle_rst_package(self, package: TCPPackage):
         pass
 
     def handle_ack_package(self, package:TCPPackage):
+        if self.state == TCP.SYNACK_SENT:
+            self.establish_connection(package)
         if self.state != TCP.CONNECTED:
             self._update_ack(package)
         super().handle_ack_package(package)
@@ -404,10 +408,15 @@ class TCPConn(Conn):
         self._send(syn_package)
         
     def handle_syn_package(self, package:TCPPackage):
-        if self.state == TCP.SYN_SENT:
-            # Set other endpoint variables
-            self.base_ack_number = package.seq_number
-            self.ack_number = ut.next_number(package.seq_number)
+        if self.state == TCP.SYN_SENT and package.ack_flag and package.ack_number == self.seq_number\
+            or self.state == TCP.CONNECTED:
+                
+            if self.state == TCP.SYN_SENT:
+                # Set other endpoint variables
+                self.base_ack_number = package.seq_number
+                self.ack_number = ut.next_number(package.seq_number)
+                self.to_dump = self.ack_number # The first byte to dump is the first expected 
+                self.state = TCP.CONNECTED
             self.ack_server_handshake(package)
         
     def ack_server_handshake(self, server_package:TCPPackage):
@@ -415,10 +424,7 @@ class TCPConn(Conn):
         Acknowledge the handshake message (`server_package`) from client  
         Prepare the current connection to send-receive process
         """
-        if server_package.ack_flag and server_package.ack_number == self.seq_number:
-            # Get endpoint port
-            conn_port = server_package.urg_ptr
-            
+        if not self._synack_package:
             # Build send package
             response = server_package.copy()
             response.swap_endpoints()
@@ -426,16 +432,22 @@ class TCPConn(Conn):
             response.seq_number = self._use_seq_number()
             response.ack_number = self.ack_number
             response.update_checksum()
-            
-            # Send package
-            self._send(response, False)
-            
-            # Update connection state
-            TCP.remove_connection(self)
-            self.dest_port = conn_port
-            TCP.add_connection(self)
-            self.to_dump = self.ack_number # The first byte to dump is the first expected 
+            self._synack_package = response
+        
+        # Send package
+        self._send(self._synack_package, False)
+
+    def establish_connection(self, package:TCPPackage):
+        """
+        Last step of initial handshake
+        """
+        if self.ack_number == package.seq_number:
             self.state = TCP.CONNECTED
+            self.seq_number = package.ack_number
+            self.ack_number = ut.next_number(package.seq_number)
+            self.to_dump = self.ack_number
+            self.__server._connection_established(self)
+            self.__server = None
     ##
     
     # End Connection
@@ -535,46 +547,26 @@ class TCPConnServer(Conn):
     def handle_syn_package(self, package:TCPPackage):
         if self.state == TCP.ACCEPT:
             key = package.source_host, package.source_port
-            if key in self.pending_ack_conn:
-                # TODO The client resend initial syn package
-                _, conn = self.pending_ack_conn[key]
-                resend_package = self._build_synack_package(package, conn.seq_number, conn.local_port) 
-                self._send(resend_package)
-            else:
+            if not key in self.pending_ack_conn:
                 self.response_handshake(package)
             
-    def handle_ack_package(self, package:TCPPackage):
-        """
-        Final step of the handshake
-        """
-        super().handle_ack_package(package)
-        key = package.source_host, package.source_port
-        expected_ack, conn = self.pending_ack_conn.pop(key,(None,None))
-        if conn and expected_ack == package.ack_number:
-            TCP.conn_dict.delete(self.local_host, self.local_port, package.source_host, package.source_port)
-            conn.state = TCP.CONNECTED
-            conn.seq_number = package.ack_number
-            conn.ack_number = ut.next_number(package.seq_number)
-            conn.to_dump = conn.ack_number
-            TCP.add_connection(conn)
-            self.accepted_connections.append(conn)
-            conn.start()
 
     def response_handshake(self, initial_package:TCPPackage):
         """
         Sends server synack package of the handshake initiated by `initial_package`
         """
-        # Create This Connection
-        TCP.conn_dict.add(self.local_host, self.local_port, 
-                          initial_package.source_host, initial_package.source_port, self)
         
         # Create New Connection
-        conn = TCPConn(initial_package.dest_host, self._get_port())
+        conn = TCPConn(initial_package.dest_host, initial_package.dest_port, server=self)
         conn.dest_host = initial_package.source_host
         conn.dest_port = initial_package.source_port
-        conn.base_ack_number = initial_package.seq_number
-        conn.ack_number = initial_package.seq_number
+        conn.ack_number = ut.next_number(initial_package.seq_number)
+        conn.base_ack_number = initial_package.ack_number
         conn.state = TCP.SYNACK_SENT
+        conn.start()
+        
+        # Create This Connection
+        TCP.add_connection(conn)
         
         # Create package
         send_package = self._build_synack_package(initial_package, conn.seq_number, conn.local_port)
@@ -583,7 +575,7 @@ class TCPConnServer(Conn):
         self.pending_ack_conn[send_package.dest_host,send_package.dest_port] = ut.next_number(send_package.seq_number),conn
         
         # Send package
-        self._send(send_package)
+        conn._send(send_package)
     
     def close(self):
         self._release_resources()
@@ -596,19 +588,18 @@ class TCPConnServer(Conn):
         send_package.ack_number = ut.next_number(syn_package.seq_number)
         send_package.seq_number = conn_seq_number
         
-        # Attach the new created port number 
-        send_package.urg_ptr = conn_port
-        
         send_package.update_checksum()
         return send_package
-        
     
-    def _get_port(self):
+    def _connection_established(self, conn:TCPConn):
         """
-        Get port for new connection created by server
+        Called from `conn` to finish server dependencies
         """
-        return random.randint(1024, (1<<16)-1)
-
+        key = conn.dest_host, conn.dest_port
+        expected_ack, conn = self.pending_ack_conn.pop(key,(None,None))
+        if conn:
+            self.accepted_connections.append(conn)
+    
 class ConnectionDict:
     """
     Dictionary that maps (source_host,source_port,destination_host,destination_port) to 
@@ -680,8 +671,8 @@ class TCP:
         """
         while True:
             data = self.recv_sock.recv(2048)
-            if self._can_queue_data(data):
-                package = TCPPackage(data)
+            package = TCPPackage(data)
+            if self._can_queue_data(package):
                 log.info(f"TCP recv package: {package._info()}")
                 conn = self.conn_dict.get(package.dest_host, package.dest_port,
                                           package.source_host, package.source_port)
@@ -752,11 +743,14 @@ class TCP:
             time.sleep(0.1)
         return data
     
-    def _can_queue_data(self, data:bytes):
+    def _can_queue_data(self, pkg:TCPPackage):
         """
-        returns if the data must be queued in the `in_buffer`
+        returns if the `pkg` must be queued
         """
+        # if not pkg.syn_flag and pkg.ack_flag and not pkg.data: # Simulate data lost
+        #     return False
         return True
+        # return random.choice([True, False]) # Simulate unreliable transport medium
     
     def _send_no_conn_reply(self, package:TCPPackage):
         """
