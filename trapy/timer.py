@@ -28,4 +28,6 @@ class Timer(object):
             return False
         else:
             return time.time() - self._start_time >= self._duration
-   
+    
+    def set_duration(self, value:int):
+        self._duration = value

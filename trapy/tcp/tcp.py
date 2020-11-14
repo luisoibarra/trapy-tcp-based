@@ -3,6 +3,7 @@ import trapy.utils as ut
 from trapy.timer import Timer
 import random
 import time
+import datetime
 from threading import Thread, Lock
 from concurrent.futures import ThreadPoolExecutor, Future
 import logging as log
@@ -75,9 +76,11 @@ class TCPPackage:
 
 class Sender:
     
-    DEFAULT_TIMEOUT = 1
+    DEFAULT_TIMEOUT = 1 # Recommended RFC 6298
     DEFAULT_WINDOW_SIZE = 10
     DEFAULT_PKG_SIZE = 1
+    RTT_WEIGHT = 0.125 # Recommended
+    DEV_ERRT_WEIGHT = 0.25 # Recommended
     
     def __init__(self, *args, **kwargs):
         self.executor = ThreadPoolExecutor(max_workers=1)
@@ -92,9 +95,13 @@ class Sender:
     
     def send(self, packets:list, seq_number:int, **kwargs) -> Future:
         self.to_send = packets
+        self.to_send_ack_count = [0 for _ in range(len(self.to_send))] # To Provide Fast Retransmit 
         self.base = 0
         self.window_size = kwargs.get('window_size',self.DEFAULT_WINDOW_SIZE)
         self.next_to_send = self.base
+        self.ertt = None # Estimated round trip time
+        self.dev_ertt = None # Deviation of ertt
+        self.base_send_count = [self.base, 0, None] # Count how many times the base pkg was sent, the third element is the sending time of the first pkg if only one was sent
         self.timer = Timer(kwargs.get('timeout',self.DEFAULT_TIMEOUT))
         self.__running = True
         self.finished = False
@@ -105,6 +112,8 @@ class Sender:
         while self.__running and self.base < len(self.to_send):
             window_end = min(self.base+self.window_size, len(self.to_send))
             while self.next_to_send < window_end:
+                self._update_base_send_count()
+                
                 pkg = self.to_send[self.next_to_send]
                 self.send_sock.sendto(pkg.to_bytes(), (pkg.dest_host, pkg.dest_port))
                 self.next_to_send += 1
@@ -118,8 +127,8 @@ class Sender:
             if self.timer.timeout():
                 self.next_to_send = self.base
                 self.timer.stop()
+                self.timer.set_duration(self.timer._duration * 2) # Timeout double the interval
             else:
-                self.base = self.next_to_send
                 self.window_size = min(self.window_size, len(self.to_send) - self.base)
         self.finished = True
 
@@ -130,15 +139,18 @@ class Sender:
         for i, pkg in enumerate(self.to_send[self.base:], self.base):
             if pkg.seq_number == ack:
                 self.base = i
-                self.timer.stop()
+                self._update_ertt()
+                if self.base == self.next_to_send - 1: # ACK the last pkg sent
+                    self.timer.stop()
                 break
         else:
             # ACK number passed sending data threshold
             pkg = self.to_send[-1] 
             if pkg.seq_number + len(pkg.data) <= ack:
                 self.base = len(self.to_send)
+                self._update_ertt()
                 self.timer.stop()
-
+     
     def close(self):
         timer = Timer(10)
         timer.start()
@@ -150,6 +162,31 @@ class Sender:
         self.executor.shutdown()
         self.send_sock.close()
 
+    def _update_ertt(self):
+        """
+        If the conditions are satisfied update the `ertt` and `dev_ertt` values 
+        """
+        if self.base > self.base_send_count[0] and self.base_send_count[2]:
+            now = time.time()
+            sent_time = self.base_send_count[2]
+            rtt = now - sent_time
+            if self.ertt:
+                self.ertt = (1-self.RTT_WEIGHT) * self.ertt + self.RTT_WEIGHT * rtt
+                self.dev_ertt = (1 - self.DEV_ERRT_WEIGHT) * self.dev_ertt + self.DEV_ERRT_WEIGHT * abs(self.ertt - rtt)
+            else:
+                self.ertt = now - sent_time
+                self.dev_ertt = 0
+            self.timer.set_duration(self.ertt + 4 * self.dev_ertt) # Recommended
+        self.base_send_count = [self.base, 0, None]
+
+    def _update_base_send_count(self):
+        if self.base_send_count[0] == self.next_to_send:
+            self.base_send_count[1] += 1
+            if self.base_send_count[1] == 1:
+                self.base_send_count[2] = time.time()
+            else:
+                self.base_send_count[2] = None
+        
 class BatchPackageBuilder:
     """
     Build packages for the associated Conn instance  
