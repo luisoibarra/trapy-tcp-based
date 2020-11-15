@@ -14,7 +14,14 @@ def server_test():
     server = listen(address)
     client_con = accept(server)
     log.info("Server Done")
-    data_recv = recv(client_con, 2048)
+    data_recv = b""
+    data = b""
+    while True:
+        data = recv(client_con, 2048)
+        data_recv += data
+        if not data:
+            break
+        
     log.info(f"Info received: {data_recv}")
     # close(server)
     # log.info("Server Closed")
@@ -38,10 +45,10 @@ def server_test():
 def client_test():
     conn = dial(address)
     log.info("Client Done")
-    data = b''
+    data = b'123456789a123456789b123456789c' #123456789d123456789e123456789f123456789g123456789h
     data_send_len = send(conn, data)
     log.info(f"Client Sended: {data_send_len} of {len(data)}")
-    
+    close(conn)    
     # data_recv = recv(conn, 2048)
     # log.info(f"Info received: {data_recv}")
     # while data_recv:

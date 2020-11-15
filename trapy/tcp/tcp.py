@@ -68,8 +68,12 @@ class TCPPackage:
                         self.urg_ptr)
         return packet
 
-    def _info(self):
+    def _endpoint_info(self):
         address = f"{self.source_host}:{self.source_port}->{self.dest_host}:{self.dest_port}" 
+        return address
+
+    def _info(self):
+        address = self._endpoint_info()
         pkg_num = f"SEQ:{self.seq_number} ACK:{self.ack_number}"
         flags = f"[{''.join(['ACK' if self.ack_flag else '', ' RST' if self.rst_flag else '', ' SYN' if self.syn_flag else '', ' FIN' if self.fin_flag else '' ])}]"
         return f"PKG {address} {pkg_num} {flags}"
@@ -128,28 +132,38 @@ class Sender:
                 self.next_to_send = self.base
                 self.timer.stop()
                 self.timer.set_duration(self.timer._duration * 2) # Timeout double the interval
+                log.info(f"TIMEOUT {self.to_send[0]._endpoint_info()} {self.timer._duration}")
             else:
                 self.window_size = min(self.window_size, len(self.to_send) - self.base)
         self.finished = True
 
     def ack_package(self, ack:int):
-        if self.finished or self.base == len(self.to_send) or\
-            ack < self.to_send[self.base].seq_number:
+        if self.finished or self.base == len(self.to_send):
             return
-        for i, pkg in enumerate(self.to_send[self.base:], self.base):
-            if pkg.seq_number == ack:
-                self.base = i
+
+        for i, pkg in enumerate(self.to_send[:self.base+self.window_size], self.base):
+            pkg_expected_ack = pkg.seq_number + len(pkg.data) if pkg.data else pkg.seq_number + 1
+            if pkg_expected_ack == ack and self.base <= i:
+                self.base = i + 1
                 self._update_ertt()
-                if self.base == self.next_to_send - 1: # ACK the last pkg sent
+                if self.base == self.next_to_send: # ACK the last pkg sent
                     self.timer.stop()
+                    self.timer.set_duration(self.timeout_duration)
+                    log.info(f"TIMEOUT RESET {self.to_send[0]._endpoint_info()} {self.timer._duration}")
                 break
+            if pkg_expected_ack == ack:
+                # Fast Retransmit
+                self.to_send_ack_count[i] += 1
+                if not self.to_send_ack_count[i] % 3:
+                    log.info(f"FAST RETR {pkg._info()}")
+                    self.send_sock.sendto(pkg.to_bytes(), (pkg.dest_host, pkg.dest_port))
+                                        
+    @property
+    def timeout_duration(self):
+        if self.ertt != None and self.dev_ertt != None:
+            return self.ertt + 4 * self.dev_ertt # Recommended
         else:
-            # ACK number passed sending data threshold
-            pkg = self.to_send[-1] 
-            if pkg.seq_number + len(pkg.data) <= ack:
-                self.base = len(self.to_send)
-                self._update_ertt()
-                self.timer.stop()
+            return self.DEFAULT_TIMEOUT
      
     def close(self):
         timer = Timer(10)
@@ -176,7 +190,7 @@ class Sender:
             else:
                 self.ertt = now - sent_time
                 self.dev_ertt = 0
-            self.timer.set_duration(self.ertt + 4 * self.dev_ertt) # Recommended
+            self.timer.set_duration(self.timeout_duration)
         self.base_send_count = [self.base, 0, None]
 
     def _update_base_send_count(self):
@@ -278,7 +292,7 @@ class Conn:
         raise NotImplementedError()
         
     def handle_ack_package(self, package:TCPPackage):
-        if self.sender_task: #and self.sender_task.running(): # A Pending state also exist
+        if self.sender_task and not self.sender.finished:
             self.sender.ack_package(package.ack_number)
     
     def handle_rst_package(self, package:TCPPackage):
@@ -811,6 +825,8 @@ class TCP:
         """
         # if not pkg.syn_flag and pkg.ack_flag and not pkg.data: # Simulate data lost
         #     return False
+        # if pkg.no_flag:
+        #     return random.choice([True, False]) # Simulate unreliable transport medium
         return True
         # return random.choice([True, False]) # Simulate unreliable transport medium
     

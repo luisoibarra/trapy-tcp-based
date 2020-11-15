@@ -3,7 +3,7 @@
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
-from trapy import listen, accept, dial, recv, send, close
+from trapy.tcp.trapy import listen, accept, dial, recv, send, close
 
 # uncomment to use working implementation as example
 # from trapy.socket_trapy import listen, accept, dial, recv, send, close
