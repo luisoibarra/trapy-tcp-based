@@ -72,6 +72,7 @@ class TestConn(unittest.TestCase):
                 pkg, data = data[:size], data[size:]
                 len_send = send(self.server_con, pkg)
                 data = pkg[len_send:] + data
+            close(self.server_con)
             return initial_data
             
         def rcv_test():
@@ -81,6 +82,7 @@ class TestConn(unittest.TestCase):
             while rcv_data:
                 rcv_data = recv(self.client_con, 1)
                 data += rcv_data
+            close(self.client_con)
             return data
             
         server_task = self.executor.submit(send_test)
@@ -109,6 +111,7 @@ class TestConn(unittest.TestCase):
             while rcv_data:
                 rcv_data = recv(self.server_con, pkg_rcv_size)
                 data += rcv_data
+            close(self.server_con)
             return initial_data, data
             
         def rcv_test(pkg_sent_size=10,pkg_rcv_size=10):
@@ -126,11 +129,12 @@ class TestConn(unittest.TestCase):
                 pkg, data = data[:size], data[size:]
                 len_send = send(self.client_con, pkg)
                 data = pkg[len_send:] + data
+            close(self.client_con)
             return initial_data, recv_data
             
         server_task = self.executor.submit(send_test)
         client_task = self.executor.submit(rcv_test)
-        time.sleep(0.5)
+        
         while server_task.running() or client_task.running():
             time.sleep(0.5)
             
