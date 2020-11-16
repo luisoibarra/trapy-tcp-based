@@ -24,7 +24,12 @@ class TCPPackage:
         self.syn_flag = info.flags.syn
         self.fin_flag = info.flags.fin
         self.rst_flag = info.flags.rst
+        self.ece_flag = info.flags.ece
+        self.cwr_flag = info.flags.cwr
+        self.psh_flag = info.flags.psh
+        self.urg_flag = info.flags.urg
         self.urg_ptr = info.urg_ptr
+        self.window_size = info.window_size
         self.data = data
         # Checksum must be last
         self.checksum = info.checksum 
@@ -47,6 +52,13 @@ class TCPPackage:
     def no_flag(self)->bool:
         return not self.fin_flag and not self.ack_flag and not self.rst_flag and not self.syn_flag
     
+    @property
+    def expected_ack(self)->int:
+        if self.data:
+            return self.seq_number + 1
+        else:
+            return self.seq_number + len(self.data)
+    
     def update_checksum(self):
         self.checksum = self._calculate_pkg_checksum()
     
@@ -62,22 +74,44 @@ class TCPPackage:
         self.source_port, self.source_host, self.dest_port, self.dest_host = self.dest_port, self.dest_host, self.source_port, self.source_host 
 
     def _get_packet(self)->ut.PacketInfo:
+        flags = ut.PacketFlags(self.ack_flag, self.rst_flag, self.syn_flag, self.fin_flag,
+                               self.ece_flag, self.cwr_flag, self.psh_flag, self.urg_flag)
         packet = ut.PacketInfo(self.source_host, self.dest_host, self.source_port,
                         self.dest_port, self.seq_number, self.ack_number, self.checksum,
-                        ut.PacketFlags(self.ack_flag, self.rst_flag, self.syn_flag,self.fin_flag),
-                        self.urg_ptr)
+                        flags, self.urg_ptr, self.window_size)
         return packet
 
     def _endpoint_info(self):
         address = f"{self.source_host}:{self.source_port}->{self.dest_host}:{self.dest_port}" 
         return address
 
+    def _flags_info(self):
+        flags = ut.PacketFlags(self.ack_flag, self.rst_flag, self.syn_flag, self.fin_flag,
+                               self.ece_flag, self.cwr_flag, self.psh_flag, self.urg_flag)
+        str_flags = "["
+        for value,name in zip(flags, flags._fields):
+            if value:
+                str_flags += name.upper() + " "
+        else:
+            if str_flags:
+                str_flags = str_flags[:len(str_flags)-1] # Remove last space if any
+            str_flags += "]"
+        return str_flags
+
     def _info(self):
         address = self._endpoint_info()
         pkg_num = f"SEQ:{self.seq_number} ACK:{self.ack_number}"
-        flags = f"[{''.join(['ACK' if self.ack_flag else '', ' RST' if self.rst_flag else '', ' SYN' if self.syn_flag else '', ' FIN' if self.fin_flag else '' ])}]"
+        flags = self._flags_info()
         return f"PKG {address} {pkg_num} {flags}"
 
+    @staticmethod
+    def construct_data_pkg(data:bytes, local_host:str, local_port:int, dest_host:str, dest_port:int, 
+                           seq_number:int, ack_number:int, window_size:int)->'TCPPackage':
+        flags = ut.PacketFlags(False, False, False, False, False, False, False, False)
+        info = ut.PacketInfo(local_host, dest_host, local_port, dest_port, seq_number, ack_number,
+                             0, flags, 0, window_size)
+        return TCPPackage(data, info, True)
+    
 class Sender:
     
     DEFAULT_TIMEOUT = 1 # Recommended RFC 6298
@@ -221,9 +255,10 @@ class BatchPackageBuilder:
         empty_pkg = data == b""            
         while empty_pkg or data and len(packages) < max_amount:
             pkg, data = data[:max_pkg_size], data[max_pkg_size:]
+            flags = ut.PacketFlags(False, False, False, False, False, False, False, False)
             info = ut.PacketInfo(self.__conn.local_host,self.__conn.dest_host,self.__conn.local_port,
                                 self.__conn.dest_port, self.__conn._use_seq_number(len(pkg)),self.__conn.ack_number,0,
-                                ut.PacketFlags(False, False, False, False),0)
+                                flags,0,self.window_size)
             package = TCPPackage(pkg, info, checksum=True)
             packages.append(package)
             empty_pkg = False
@@ -234,6 +269,8 @@ class Conn:
     """
     Base Conn class
     """
+
+    MAX_BUFFER_SIZE = 2048
     
     def __init__(self, host:str, port:int, *args, **kwargs):
         self.local_host = host
@@ -343,9 +380,9 @@ class Conn:
         """
         Send an ack package of `package`
         """
+        flags = ut.PacketFlags(True, False, False, False, False, False, False, False)
         ack_pkg = ut.PacketInfo(self.local_host, self.dest_host, self.local_port, self.dest_port,
-                                self.seq_number, self.ack_number, 0, ut.PacketFlags(True, False, False, False),
-                                0)
+                                self.seq_number, self.ack_number, 0, flags, 0, self.window_size if hasattr(self,'window_size') else 0)
         ack_pkg = TCPPackage(b'', ack_pkg, True)
         log.info(f"ACK Sent {ack_pkg._info()}")
         self._send(ack_pkg, False)
@@ -392,6 +429,13 @@ class TCPConn(Conn):
         self._synack_package = None
         self.__server = kwargs.get('server', None)
 
+    @property
+    def window_size(self):
+        spare_space = self.MAX_BUFFER_SIZE - (len(self.dump_buffer) + sum([len(data) for key,data in self.in_package_data.items()]))
+        if spare_space < 0:
+            return 0
+        return return spare_space
+    
     def handle_rst_package(self, package: TCPPackage):
         pass
 
@@ -408,10 +452,10 @@ class TCPConn(Conn):
     
     def handle_no_flag_package(self, package:TCPPackage):
         if self.state == TCP.CONNECTED:
-            if package.seq_number >= self.to_dump:
-                self.in_package_data[package.seq_number] = package.data
-            self._update_ack(package)
-            self._send_ack()
+            if self.window_size: # There are space left in buffer
+                self._update_buffer(package)
+                self._update_ack(package)
+                self._send_ack()
 
     def send(self, data:bytes):
         init_length = len(data)
@@ -461,9 +505,10 @@ class TCPConn(Conn):
         host, port = ut.parse_address(address)
         self.dest_host = host
         self.dest_port = port
+        flags = ut.PacketFlags(False, False, True, False, False, False, False, False)
         syn_package = TCPPackage(b'',ut.PacketInfo(self.local_host,self.dest_host,self.local_port,
                                                    self.dest_port, self._use_seq_number(), 0, 0, 
-                                                   ut.PacketFlags(False, False, True, False),0),True)
+                                                   flags, 0, self.window_size),True)
         self.state = TCP.SYN_SENT
         self._send(syn_package)
         
@@ -519,9 +564,10 @@ class TCPConn(Conn):
             
             # Send fin ack
             if not self.responded_fin:
+                flags = ut.PacketFlags(True, False, False, True, False, False, False, False)
                 self.responded_fin = ut.PacketInfo(self.local_host, self.dest_host, self.local_port,
                                             self.dest_port, self._use_seq_number(), self.ack_number, 0, 
-                                            ut.PacketFlags(True, False, False, True),0)
+                                            flags, 0, self.window_size)
                 self.state = TCP.FINACK_SENT
             self._send(TCPPackage(b'', self.responded_fin, True))
             
@@ -541,11 +587,12 @@ class TCPConn(Conn):
         Start the closing process by sending a FIN pkg
         """
         if self.state == TCP.CONNECTED:
+            flags = ut.PacketFlags(False, False, False, True, False, False, False, False)
             self.sended_fin = ut.PacketInfo(self.local_host, self.dest_host, self.local_port,
                                         self.dest_port, self._use_seq_number(), self.ack_number, 0, 
-                                        ut.PacketFlags(False, False, False, True),0)
+                                        flags, 0, self.window_size)
             self.state = TCP.FIN_SENT
-            self._send(TCPPackage(b'',self.sended_fin, True))
+            self._send(TCPPackage(b'', self.sended_fin, True))
         else:
             self._release_resources()
     ##
@@ -564,6 +611,12 @@ class TCPConn(Conn):
         super()._watch_function()
         if self.fin_timer.timeout():
             self._release_resources()
+    
+    def _update_buffer(self, package:TCPPackage):
+        if package.seq_number == self.to_dump:
+            self.dump_buffer += package.data
+            
+            self.in_package_data[package.seq_number] = package.data
     
     def _release_resources(self):
         self.heavy_sender.close()
