@@ -53,7 +53,6 @@ class TCP:
     def __init__(self, *args, **kwargs):
         # self.recv_sock.bind(('',0)) # Receive all connections 
         self.recv_sock.bind(('127.0.0.2',0)) # TODO Non Production Bind Address
-        self.recv_thread = Thread(target=self.demultiplex, name='TCP', daemon=True)
         self.__running = False
 
     def start(self):
@@ -61,17 +60,20 @@ class TCP:
         Start the TCP functionality.  
         Must be called before any other method
         """
-        self.__running = True
-        self.recv_thread.start()
-        log.info("TCP Started")
+        if not self.__running:
+            self.__running = True
+            self.recv_thread = Thread(target=self.demultiplex, name='TCP', daemon=True)
+            self.recv_thread.start()
+            log.info("TCP Started")
         
     
     def end(self):
-        self.close_all()
-        self.__running = False
-        self.recv_thread.join(2)
-        self.recv_sock.close()
-        log.info("TCP Closed")
+        if self.__running:
+            self.close_all()
+            self.__running = False
+            self.recv_thread.join(2)
+            self.recv_sock.close()
+            log.info("TCP Closed")
     
     def demultiplex(self):
         """
@@ -183,16 +185,14 @@ class TCP:
         """
         with ut.get_raw_socket() as s:
             # Change package information
-            package.swap_endpoints()
             # Set rst flag to notify that no conn exist with the package address
-            package.rst_flag = True
-            package.ack_flag = False
-            package.fin_flag = False
-            package.syn_flag = False
-            package.data = b""
-            package.seq_number, package.ack_number = package.ack_number, ut.next_number(package.seq_number)
-            s.sendto(package.to_bytes(),(package.source_host, package.source_port))
-            log.info(f"RST Package sent to {(package.source_host, package.source_port)}")
+            flags = ut.PacketFlags(False, True, False, False, False, False, False, False)
+            info = ut.PacketInfo(package.dest_host, package.source_host, package.dest_port,
+                                 package.source_port, package.ack_number, package.seq_number,0,
+                                 flags, 0, package.window_size)
+            package = TCPPackage(b"", info, True)
+            s.sendto(package.to_bytes(),(package.dest_host, package.dest_port))
+            log.info(f"RST Package sent {package._endpoint_info()}")
     
     def close_all(self):
         keys = [x for x in self.conn_dict.server_conn_dict]

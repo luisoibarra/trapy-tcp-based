@@ -213,7 +213,8 @@ class Sender:
             if times == 3:
                 # Fast Retransmition
                 log.info(f"FAST RTM ACK:{ack} {self.__conn._info()}")
-                self._build_and_send_pkg(ack - self.base_seq_number)
+                if not self.finished:
+                    self._build_and_send_pkg(ack - self.base_seq_number)
             else:
                 self.fast_retr[ack] = times + 1
 
