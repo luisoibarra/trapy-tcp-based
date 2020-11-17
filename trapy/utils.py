@@ -168,15 +168,15 @@ def demultiplexing_recv(sock:s.socket, port:int, size:int = 1024, timeout:float 
             pass
     
 # TEST CONSTRUCTION DECONSTRUCTION
-data = b"THE DATA"
-flags = PacketFlags(True, False, True, False, False, False, True, True)
-pack_info = PacketInfo('127.0.1.2', '127.127.127.127', 65000, 65001, 10, 11, 0, flags,30,125) 
-packet_0_checksum = construct_packet(data, pack_info)
-pack_info = PacketInfo('127.0.1.2', '127.127.127.127', 65000, 65001, 10, 11, calculate_checksum(packet_0_checksum), flags, 30,125) 
-packet = construct_packet(data, pack_info)
-print(data)
-print(pack_info)
-new_data, info = deconstruct_packet(packet)
-print(new_data)
-print("Checksum valid:", valid_checksum(packet, 0))
-print(info)
+# data = b"THE DATA"
+# flags = PacketFlags(True, False, True, False, False, False, True, True)
+# pack_info = PacketInfo('127.0.1.2', '127.127.127.127', 65000, 65001, 10, 11, 0, flags,30,125) 
+# packet_0_checksum = construct_packet(data, pack_info)
+# pack_info = PacketInfo('127.0.1.2', '127.127.127.127', 65000, 65001, 10, 11, calculate_checksum(packet_0_checksum), flags, 30,125) 
+# packet = construct_packet(data, pack_info)
+# print(data)
+# print(pack_info)
+# new_data, info = deconstruct_packet(packet)
+# print(new_data)
+# print("Checksum valid:", valid_checksum(packet, 0))
+# print(info)
