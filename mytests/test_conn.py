@@ -161,7 +161,7 @@ class TestConn(unittest.TestCase):
         server_file = f'mytests/data/{filename}'
         client_file = f'mytests/data/tmp-data/{filename}'
         
-        def send_test(pkg_size=10):
+        def send_test(pkg_size=1024):
             self.server = listen(self.address)
             self.server_con = accept(self.server)
             size = pkg_size
@@ -191,5 +191,36 @@ class TestConn(unittest.TestCase):
         
         self.assertEqual(server_task.result(), client_task.result(), "Data sended and received are different")
 
+    def test_flow_control(self):
+        # Set Conn.MAX_BUFFER_SIZE to 10
+        initial_data = b"123456789a123456789b123456789c123456789d"
+        def send_test():
+            self.server = listen(self.address)
+            self.server_con = accept(self.server)
+            data = initial_data
+            size = 1024
+            while data:
+                pkg, data = data[:size], data[size:]
+                len_send = send(self.server_con, pkg)
+                data = pkg[len_send:] + data
+            close(self.server_con)
+            return initial_data
+            
+        def rcv_test():
+            self.client_con = dial(self.address)
+            data = b''
+            rcv_data = True
+            while rcv_data:
+                rcv_data = recv(self.client_con, 1)
+                time.sleep(1) # slow consumer
+                data += rcv_data
+            return data
+            
+        server_task = self.executor.submit(send_test)
+        client_task = self.executor.submit(rcv_test)
+
+        while server_task.running() or client_task.running():
+            time.sleep(0.5)
+
 if __name__ == "__main__":
-    unittest.main()  
+    unittest.main(module="mytests.test_conn",defaultTest="TestConn.test_flow_control")  

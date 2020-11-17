@@ -3,6 +3,7 @@ from trapy.tcp.tcp_log import log
 from trapy.tcp.tcp2_exc import ConnException
 import trapy.tcp.tcp2_exc as exc
 from concurrent.futures import ThreadPoolExecutor, Future
+from threading import Lock
 import trapy.utils as ut
 from trapy.timer import Timer
 import time
@@ -10,11 +11,13 @@ import time
 class Sender:
     
     DEFAULT_TIMEOUT = 1 # Recommended RFC 6298
-    DEFAULT_WINDOW_SIZE = 10
-    DEFAULT_PKG_SIZE = 1 # Must be <= MAX_PKG_SIZE
-    MAX_PKG_SIZE = 1460
+    MSS = 1460 # Max segment size
+    DEFAULT_PKG_SIZE = MSS # Must be <= MSS
     RTT_WEIGHT = 0.125 # Recommended
     DEV_ERRT_WEIGHT = 0.25 # Recommended
+    INIT_CWS = 1 # Recommended Initial sender window size measured in MSS 
+    INIT_RWS = 2048 # Size of connection buffer. Space left in the rcv buffer 
+    RWS_SCALE = 1 # Scale factor of rws => bytes amount in buffer is INIT_RWS * RWS_SCALE
     
     def __init__(self, conn:"Conn", **kwargs):
         self.__executor = ThreadPoolExecutor(1, thread_name_prefix=conn._info())
@@ -23,7 +26,8 @@ class Sender:
         self.ertt = None
         self.dev_ertt = None
         self.pkg_size = self.DEFAULT_PKG_SIZE
-        self.window_size = self.DEFAULT_WINDOW_SIZE
+        self.cws = self.INIT_CWS 
+        self.rws = self.INIT_RWS * self.RWS_SCALE
         self.timeout = self.DEFAULT_TIMEOUT
         self.timer = Timer(self.timeout)
         self.fast_retr = dict() # ack -> times recv
@@ -60,8 +64,8 @@ class Sender:
     
     def __send(self):
         while self.__running and self.base < len(self.data):
-            window_end = min(self.base + self.window_size * self.pkg_size, len(self.data))
-            while self.next_to_send < window_end:
+            window_size = min(min(self.cws * self.pkg_size, self.rws), len(self.data))
+            while self.next_to_send < self.base + window_size:
                 pkg_sent = self._build_and_send_pkg(self.next_to_send)
                 self.next_to_send += len(pkg_sent.data)
             
@@ -74,10 +78,12 @@ class Sender:
             if self.timer.timeout():
                 self.next_to_send = self.base
                 self.timer.stop()
-                self.timer.set_duration(self.timer._duration * 2) # Timeout double the interval
-                log.info(f"TIMEOUT {pkg_sent._endpoint_info()} {self.timer._duration}")
-            # else:
-            #     self.window_size = min(self.window_size, (len(data) - self.base)) # <- Verify if used
+                if self.rws: # Space in recv buffer
+                    self.timer.set_duration(self.timer._duration * 2) # Timeout double the interval
+                    log.info(f"TIMEOUT {pkg_sent._endpoint_info()} {self.timer._duration}")
+                else:
+                    log.info(f"RCV BUF FULL {pkg_sent._endpoint_info()}")
+                            
         self._reset_variables()
         self._next_scheduled()
 
@@ -164,13 +170,8 @@ class Sender:
         if self.finished and self.to_send_queue:
             send_next = self.to_send_queue.pop(0)
     
-    def _set_sending_rate(self, rcv_window_size:int):
-        data_to_send = len(self.data[self.base:])
-        byte_window = self.window_size * self.pkg_size
-        left_to_send = min(data_to_send, byte_window)
-        if left_to_send > rcv_window_size:
-            pass # TODO
-            
+    def _set_rws(self, rcv_window_size:int):
+        self.rws = rcv_window_size * self.RWS_SCALE
 
     def __send_pkg_raw(self, pkg:TCPPackage):
         log.info(f"SENT {pkg._info()}")
@@ -197,10 +198,9 @@ class Sender:
             return
         
         ack = ack_pkg.ack_number
-        rcv_window_size = ack_pkg.window_size
         
         self._set_ertt_dev_ertt(ack)
-        self._set_sending_rate(rcv_window_size)
+        self._set_rws(ack_pkg.window_size)
         
         base_seq_num = self.base + self.base_seq_number
 
@@ -251,8 +251,9 @@ class Conn:
     ACCEPT = "ACCEPT" # Server accepting connections
     CLOSED = "CLOSED" # Endpoint closed
     
-    MAX_BUFFER_SIZE = 2048 # Max number of bytes allowed in out buffer
+    MAX_BUFFER_SIZE = Sender.INIT_RWS * Sender.RWS_SCALE # Max number of bytes allowed in out buffer
     FIN_WAITING = 5 # Time to wait for connection to close
+    FLOW_WAITING = 2 # Interval of time between flow control ack
     
     def __init__(self, local_host:str, local_port:int, dest_host:str, dest_port:int, tcp_layer):
         self.__state = Conn.CLOSED
@@ -267,6 +268,9 @@ class Conn:
         self.dest_port = dest_port
         self.sender = Sender(self)
         self.__fin_executor = None
+        self.__no_window_size_executor = None
+        self.__flow_ack_active = False
+        self.__dump_buffer_lock = Lock()
         self.__tcp = tcp_layer
 
     def init_server(self):
@@ -287,7 +291,7 @@ class Conn:
     @property
     def window_size(self):
         buffer_len = len(self.dump_buffer) if self.dump_buffer else 0
-        return self.MAX_BUFFER_SIZE - buffer_len
+        return int((self.MAX_BUFFER_SIZE - buffer_len) / self.sender.RWS_SCALE)
     
     @property
     def is_closed(self) -> bool:
@@ -326,18 +330,20 @@ class Conn:
                 self._handle_fin(pkg)
     
     def dump(self, length:int):
-        if self.dump_buffer == None:
-            if self.state == Conn.CLOSED:
-                if self.__close_pkg_sent:
-                    raise ConnException(exc.CON_CLOSE_READ_MSG)
-                self.__close_pkg_sent = True
-                return b""
-            return None
-        data, self.dump_buffer = self.dump_buffer[:length], self.dump_buffer[length:]
-        self.dump_number += len(data)
-        if not self.dump_buffer:
-            self.dump_buffer = None
-            self.dump_number = None
+        with self.__dump_buffer_lock:
+            if self.dump_buffer == None:
+                if self.state == Conn.CLOSED:
+                    if self.__close_pkg_sent:
+                        raise ConnException(exc.CON_CLOSE_READ_MSG)
+                    self.__close_pkg_sent = True
+                    return b""
+                return None
+            data, self.dump_buffer = self.dump_buffer[:length], self.dump_buffer[length:]
+            self.dump_number += len(data)
+            if not self.dump_buffer:
+                self.dump_buffer = None
+                self.dump_number = None
+            self._start_flow_ack()
         return data
     
     def send(self, data:bytes)->int:
@@ -413,20 +419,48 @@ class Conn:
     
     def _handle_no_flag(self, pkg:TCPPackage):
         self._update_buffer(pkg)
-        self._update_ack(pkg)
         self._send_ack()
     
     def _update_buffer(self, pkg:TCPPackage):
         """
         Update `dump_buffer` with incoming package
         """
-        if self.dump_buffer == None: # Buffer not initialized
-            if pkg.seq_number == self.ack_number: # Is the pkg expected
-                self.dump_buffer = pkg.data
-                self.dump_number = pkg.seq_number
-        elif self.dump_number <= pkg.seq_number <= self.dump_number + len(self.dump_buffer) < pkg.seq_number + len(pkg.data): # The pkg data has data to get into the dump_buffer
-            self.dump_buffer += pkg.data[self.dump_number + len(self.dump_buffer) - pkg.seq_number:]
+        with self.__dump_buffer_lock:
+            init_buf_len = len(self.dump_buffer) if self.dump_buffer else 0
+            if self.dump_buffer == None: # Buffer not initialized
+                if pkg.seq_number == self.ack_number: # Is the pkg expected
+                    self.dump_buffer = pkg.data
+                    self.dump_number = pkg.seq_number
+            elif self.dump_number <= pkg.seq_number <= self.dump_number + len(self.dump_buffer) < pkg.seq_number + len(pkg.data): # The pkg data has data to get into the dump_buffer
+                self.dump_buffer += pkg.data[self.dump_number + len(self.dump_buffer) - pkg.seq_number:]
             
+            if len(self.dump_buffer) > self.MAX_BUFFER_SIZE:
+                self.dump_buffer = self.dump_buffer[:self.MAX_BUFFER_SIZE]
+            
+            self.ack_number += len(self.dump_buffer) - init_buf_len if pkg.data else 1 # Plus 1 in case of no data to ack the pkg
+            
+            if not self.window_size: # Buffer is full
+                self._start_flow_ack()
+    
+    def _start_flow_ack(self):
+        if not self.__no_window_size_executor:
+            self.__no_window_size_executor = ThreadPoolExecutor(1, thread_name_prefix=f"flow ack: {self._info()}")
+        
+        if not self.__flow_ack_active:
+            self.__flow_ack_active = True
+            self.__no_window_size_executor.submit(self._send_flow_update_ack, self.ack_number)
+    
+    def _send_flow_update_ack(self, current_ack:int):
+        log.info(f"FLOW CTRL ON {self._info()}")
+        while not self.window_size and self.__flow_ack_active: # Wait for space in buffer
+            time.sleep(0.5)
+            
+        while self.ack_number == current_ack and self.__flow_ack_active: # Wait for sender to restart send data
+            self._send_ack() # Send ack to notify sender the available space
+            time.sleep(self.FLOW_WAITING)
+        self.__flow_ack_active = False
+        log.info(f"FLOW CTRL OFF {self._info()}")
+        
     def _send_ack(self):
         flags = ut.PacketFlags(True, False, False, False, False, False, False, False)
         pkg = self._build_pkg(b"", flags)
@@ -475,6 +509,9 @@ class Conn:
         self.__tcp.remove_connection(self)
         if self.__fin_executor:
             self.__fin_executor.shutdown(False)
+        if self.__no_window_size_executor:
+            self.__flow_ack_active = False
+            self.__no_window_size_executor.shutdown(False)
         
     def _info(self) -> str:
         if self.is_server:
