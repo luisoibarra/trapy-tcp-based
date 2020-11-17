@@ -174,7 +174,7 @@ class TCP:
         #     return False
         # if pkg.no_flag:
         #     return random.choice([True, False]) # Simulate unreliable transport medium
-        return True
+        return not pkg.corrupted
         # return random.choice([True, False]) # Simulate unreliable transport medium
     
     def _send_no_conn_reply(self, package:TCPPackage):

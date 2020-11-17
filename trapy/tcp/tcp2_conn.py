@@ -1,6 +1,7 @@
 from trapy.tcp.tcp_pkg import TCPPackage
 from trapy.tcp.tcp_log import log
 from trapy.tcp.tcp2_exc import ConnException
+import trapy.tcp.tcp2_exc as exc
 from concurrent.futures import ThreadPoolExecutor, Future
 import trapy.utils as ut
 from trapy.timer import Timer
@@ -10,12 +11,13 @@ class Sender:
     
     DEFAULT_TIMEOUT = 1 # Recommended RFC 6298
     DEFAULT_WINDOW_SIZE = 10
-    DEFAULT_PKG_SIZE = 1
+    DEFAULT_PKG_SIZE = 1 # Must be <= MAX_PKG_SIZE
+    MAX_PKG_SIZE = 1460
     RTT_WEIGHT = 0.125 # Recommended
     DEV_ERRT_WEIGHT = 0.25 # Recommended
     
     def __init__(self, conn:"Conn", **kwargs):
-        self.__executor = ThreadPoolExecutor(1, thread_name_prefix="Sender")
+        self.__executor = ThreadPoolExecutor(1, thread_name_prefix=conn._info())
         self.sock = ut.get_raw_socket()
         self.__conn = conn
         self.ertt = None
@@ -88,7 +90,7 @@ class Sender:
             self.base = 0
             self.next_to_send = len(pkg.data) if pkg.data else 1 
             self.base_seq_number = pkg.seq_number
-            self.data = None
+            self.data = pkg.data
             self.fast_retr = dict() # ack -> times recv
             self.ack_sent = dict() # expected ack for pkg sent -> (time,count)   
             self.pkg_sending = pkg
@@ -161,6 +163,13 @@ class Sender:
     def _next_scheduled(self):
         if self.finished and self.to_send_queue:
             send_next = self.to_send_queue.pop(0)
+    
+    def _set_sending_rate(self, rcv_window_size:int):
+        data_to_send = len(self.data[self.base:])
+        byte_window = self.window_size * self.pkg_size
+        left_to_send = min(data_to_send, byte_window)
+        if left_to_send > rcv_window_size:
+            pass # TODO
             
 
     def __send_pkg_raw(self, pkg:TCPPackage):
@@ -183,17 +192,21 @@ class Sender:
         else:
             raise Exception("Only TCPPackages are valid to send in a non reliable way")
 
-    def ack_pkg(self, ack:int):
-        self._set_ertt_dev_ertt(ack)
-        
-        if self.finished: 
+    def rcv_pkg(self, ack_pkg:TCPPackage):
+        if self.finished:
             return
+        
+        ack = ack_pkg.ack_number
+        rcv_window_size = ack_pkg.window_size
+        
+        self._set_ertt_dev_ertt(ack)
+        self._set_sending_rate(rcv_window_size)
         
         base_seq_num = self.base + self.base_seq_number
 
         if base_seq_num < ack:
             self.base = ack - self.base_seq_number
-            if self.base == self.next_to_send:
+            if self.base >= self.next_to_send:
                 self.timer.stop()
         else:
             times = self.fast_retr.pop(ack,1)
@@ -272,7 +285,7 @@ class Conn:
     
     @property
     def window_size(self):
-        buffer_len = len(self.dump_buffer) if self.dump_number else 0
+        buffer_len = len(self.dump_buffer) if self.dump_buffer else 0
         return self.MAX_BUFFER_SIZE - buffer_len
     
     @property
@@ -315,11 +328,12 @@ class Conn:
         if self.dump_buffer == None:
             if self.state == Conn.CLOSED:
                 if self.__close_pkg_sent:
-                    raise ConnException("Connection closed")
+                    raise ConnException(exc.CON_CLOSE_READ_MSG)
                 self.__close_pkg_sent = True
                 return b""
             return None
         data, self.dump_buffer = self.dump_buffer[:length], self.dump_buffer[length:]
+        self.dump_number += len(data)
         if not self.dump_buffer:
             self.dump_buffer = None
             self.dump_number = None
@@ -341,6 +355,8 @@ class Conn:
                 return self.accepted_conns.pop(0)
     
     def close(self):
+        if self.state == Conn.CLOSED:
+            raise ConnException(exc.CON_ALREADY_CLOSED_MSG)
         if self.is_server:
             self._close_connection(0)
             return
@@ -361,7 +377,7 @@ class Conn:
             self.__synack_seq_number = synack_pkg.seq_number
             
     def _handle_ack(self, pkg:TCPPackage):
-        self.sender.ack_pkg(pkg.ack_number)
+        self.sender.rcv_pkg(pkg)
         if self.state == Conn.SYNACK_SENT and self.__synack_seq_number < pkg.ack_number:
             self.state = Conn.CONNECTED
         if self.state == Conn.FINACK_SENT and self.__finack_seq_number < pkg.ack_number:
@@ -379,10 +395,15 @@ class Conn:
                 if not self.__fin_executor:
                     self.__fin_executor = ThreadPoolExecutor(1)
                 self.__fin_executor.submit(self._close_connection, self.FIN_WAITING)
+            if self.state in [Conn.FIN_WAIT, Conn.FINACK_SENT]: # FINACK_SENT because both endpoints closed at the same time
                 self._send_ack()
-            if self.state == Conn.FIN_WAIT:
-                self._send_ack()
-        elif self.state == Conn.CONNECTED: # FIN pkg
+        elif self.state in [Conn.CONNECTED, Conn.FIN_SENT]: # FIN pkg
+            if self.state == Conn.FIN_SENT: # Both endpoints closed at the same time
+                pkg = pkg.copy()
+                pkg.ack_number += 1 # ACK the FIN PKG
+                self.sender.rcv_pkg(pkg)
+                while not self.sender.finished:
+                    time.sleep(0.05)
             self.state = Conn.FINACK_SENT
             flags = ut.PacketFlags(True, False, False, True, False, False, False, False)
             finack_pkg = self._build_pkg(b"", flags)
@@ -400,8 +421,8 @@ class Conn:
         """
         if self.dump_buffer == None: # Buffer not initialized
             if pkg.seq_number == self.ack_number: # Is the pkg expected
-                 self.dump_buffer = pkg.data
-                 self.dump_number = pkg.seq_number
+                self.dump_buffer = pkg.data
+                self.dump_number = pkg.seq_number
         elif self.dump_number <= pkg.seq_number <= self.dump_number + len(self.dump_buffer) < pkg.seq_number + len(pkg.data): # The pkg data has data to get into the dump_buffer
             self.dump_buffer += pkg.data[self.dump_number + len(self.dump_buffer) - pkg.seq_number:]
             
@@ -409,6 +430,7 @@ class Conn:
         flags = ut.PacketFlags(True, False, False, False, False, False, False, False)
         pkg = self._build_pkg(b"", flags)
         self.sender.schedule(pkg, False)
+        return pkg
     
     def _update_ack(self, pkg:TCPPackage):
         """
@@ -448,7 +470,6 @@ class Conn:
     def _close_connection(self, timeout:int):
         time.sleep(timeout)
         self.sender.close()
-        self.dump_buffer = None
         self.state = Conn.CLOSED
         self.__tcp.remove_connection(self)
         if self.__fin_executor:
