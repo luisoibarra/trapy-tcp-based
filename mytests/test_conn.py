@@ -157,7 +157,7 @@ class TestConn(unittest.TestCase):
         self.assertEqual(server_task.result(), value, "Data sended and received are different")
     
     def test_file_transfer(self):
-        filename = 'small.txt' 
+        filename = 'large.txt' 
         server_file = f'mytests/data/{filename}'
         client_file = f'mytests/data/tmp-data/{filename}'
         
@@ -176,7 +176,7 @@ class TestConn(unittest.TestCase):
         def rcv_test():
             self.client_con = dial(self.address)
             rcv_data = True
-            recv_size = 1
+            recv_size = 1024
             with open(client_file, 'wb') as f:
                 while rcv_data:
                     rcv_data = recv(self.client_con, recv_size)
@@ -223,4 +223,4 @@ class TestConn(unittest.TestCase):
             time.sleep(0.5)
 
 if __name__ == "__main__":
-    unittest.main(module="mytests.test_conn",defaultTest="TestConn.test_flow_control")  
+    unittest.main(module="mytests.test_conn",defaultTest="TestConn.test_file_transfer")  

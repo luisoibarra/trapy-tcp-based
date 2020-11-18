@@ -10,12 +10,17 @@ import time
 
 class Sender:
     
+    SLOW_START = "SLOW START" 
+    CONG_AVOID = "CONGESTION AVOIDANCE"
+    FAST_RECOV = "FAST RECOVERY"
+        
     DEFAULT_TIMEOUT = 1 # Recommended RFC 6298
-    MSS = 1460 # Max segment size
+    MSS = 1460 # Recommended Max segment size
     DEFAULT_PKG_SIZE = MSS # Must be <= MSS
     RTT_WEIGHT = 0.125 # Recommended
     DEV_ERRT_WEIGHT = 0.25 # Recommended
-    INIT_CWS = 1 # Recommended Initial sender window size measured in MSS 
+    INIT_CWS = 1 * MSS # Recommended Initial sender window size measured in MSS 
+    INIT_SS_THRESH = 64 * 8 * 1024 # Recommended 64KB  Slow Start Threshold 
     INIT_RWS = 2048 # Size of connection buffer. Space left in the rcv buffer 
     RWS_SCALE = 1 # Scale factor of rws => bytes amount in buffer is INIT_RWS * RWS_SCALE
     
@@ -26,7 +31,10 @@ class Sender:
         self.ertt = None
         self.dev_ertt = None
         self.pkg_size = self.DEFAULT_PKG_SIZE
+        self.__state = Sender.SLOW_START
         self.cws = self.INIT_CWS 
+        self.ssthr = self.INIT_SS_THRESH
+        self.dupl_ack = 0
         self.rws = self.INIT_RWS * self.RWS_SCALE
         self.timeout = self.DEFAULT_TIMEOUT
         self.timer = Timer(self.timeout)
@@ -43,6 +51,15 @@ class Sender:
             return self.ertt + 4 * self.dev_ertt # Recommended
         else:
             return self.DEFAULT_TIMEOUT
+    
+    @property
+    def state(self):
+        return self.__state
+    
+    @state.setter
+    def state(self, value:str):
+        log.info(f"{self.state}->{value} CWS:{self.cws} SST:{self.ssthr} DACK:{self.dupl_ack} {self.__conn._info()}")
+        self.__state = value
     
     def send(self, data:bytes, seq_number:int)->Future:
         """
@@ -64,7 +81,7 @@ class Sender:
     
     def __send(self):
         while self.__running and self.base < len(self.data):
-            window_size = min(min(self.cws * self.pkg_size, self.rws), len(self.data))
+            window_size = min(min(self.cws, self.rws), len(self.data))
             while self.next_to_send < self.base + window_size:
                 pkg_sent = self._build_and_send_pkg(self.next_to_send)
                 self.next_to_send += len(pkg_sent.data)
@@ -79,10 +96,11 @@ class Sender:
                 self.next_to_send = self.base
                 self.timer.stop()
                 if self.rws: # Space in recv buffer
+                    self._handle_timeout()
                     self.timer.set_duration(self.timer._duration * 2) # Timeout double the interval
-                    log.info(f"TIMEOUT {pkg_sent._endpoint_info()} {self.timer._duration}")
+                    log.info(f"TIMEOUT {self.__conn._info()} {self.timer._duration}")
                 else:
-                    log.info(f"RCV BUF FULL {pkg_sent._endpoint_info()}")
+                    log.info(f"RCV BUF FULL {self.__conn._info()}")
                             
         self._reset_variables()
         self._next_scheduled()
@@ -206,9 +224,11 @@ class Sender:
 
         if base_seq_num < ack:
             self.base = ack - self.base_seq_number
+            self._handle_new_ack()
             if self.base >= self.next_to_send:
                 self.timer.stop()
-        else:
+        elif self.rws:
+            self._handle_dupl_ack()
             times = self.fast_retr.pop(ack,1)
             if times == 3:
                 # Fast Retransmition
@@ -238,6 +258,37 @@ class Sender:
         self.fast_retr = dict()
         self.ack_sent = dict()
 
+    def _handle_timeout(self):
+        self.ssthr = self.cws // 2
+        self.cws = self.MSS
+        self.dupl_ack = 0
+        if self.state in [Sender.CONG_AVOID, Sender.CONG_AVOID]:
+            self.state = Sender.SLOW_START
+            
+    def _handle_new_ack(self):
+        if self.state == Sender.CONG_AVOID:
+            self.cws = self.cws + self.MSS * (self.MSS//self.cws)
+            self.dupl_ack = 0
+        if self.state == Sender.FAST_RECOV:
+            self.cws = self.ssthr
+            self.dupl_ack = 0
+            self.state = Sender.CONG_AVOID
+        if self.state == Sender.SLOW_START:
+            self.cws += self.MSS
+            self.dupl_ack = 0
+            if self.cws >= self.ssthr:
+                self.state = Sender.CONG_AVOID
+            
+    def _handle_dupl_ack(self):
+        if self.state in [Sender.SLOW_START, Sender.CONG_AVOID]:
+            self.dupl_ack += 1
+            if self.dupl_ack == 3:
+                self.ssthr = self.cws // 2
+                self.cws = self.ssthr + 3 * self.MSS
+                self.state = Sender.FAST_RECOV
+        if self.state == Sender.FAST_RECOV:
+            self.cws += self.MSS
+        
 class Conn:
         
     # Connection States
@@ -337,6 +388,7 @@ class Conn:
                         raise ConnException(exc.CON_CLOSE_READ_MSG)
                     self.__close_pkg_sent = True
                     return b""
+                self._start_flow_ack()
                 return None
             data, self.dump_buffer = self.dump_buffer[:length], self.dump_buffer[length:]
             self.dump_number += len(data)
