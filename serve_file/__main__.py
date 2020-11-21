@@ -2,8 +2,10 @@
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
-
-from trapy.tcp.trapy import listen, accept, dial, recv, send, close
+import sys
+sys.path.append(sys.path[0] + "/..")
+from trapy.trapy import listen, accept, dial, recv, send, close
+import time
 
 # uncomment to use working implementation as example
 # from trapy.socket_trapy import listen, accept, dial, recv, send, close
@@ -121,3 +123,12 @@ def make_argumentparser():
 
 if __name__ == '__main__':
     main()
+    # executor = ThreadPoolExecutor()
+    # address = "127.0.0.2:6500"
+    # filename = 'small.txt' 
+    # server_file = f'mytests/data/{filename}'
+    # client_file = f'mytests/data/tmp-data/{filename}'
+    # server = executor.submit(make_server, address, server_file, 1024) 
+    # client = executor.submit(make_client, address, client_file)
+    # while server.running() or client.running():
+    #     time.sleep(0.5)

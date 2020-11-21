@@ -1,7 +1,7 @@
 from trapy.tcp.tcp_pkg import TCPPackage
 from trapy.tcp.tcp_log import log
-from trapy.tcp.tcp2_exc import ConnException
-import trapy.tcp.tcp2_exc as exc
+from trapy.tcp.tcp_exc import ConnException
+import trapy.tcp.tcp_exc as exc
 from concurrent.futures import ThreadPoolExecutor, Future
 from threading import Lock
 import trapy.utils as ut
@@ -500,8 +500,11 @@ class Conn:
         
         if not self.__flow_ack_active:
             self.__flow_ack_active = True
-            self.__no_window_size_executor.submit(self._send_flow_update_ack, self.ack_number)
-    
+            try:
+                self.__no_window_size_executor.submit(self._send_flow_update_ack, self.ack_number)
+            except RuntimeError:
+                self.__flow_ack_active = False
+                
     def _send_flow_update_ack(self, current_ack:int):
         log.info(f"FLOW CTRL ON {self._info()}")
         while not self.window_size and self.__flow_ack_active: # Wait for space in buffer

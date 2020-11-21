@@ -1,4 +1,4 @@
-# from trapy.socket_trapy import *
+# from trapy.tcp.trapy import *
 from trapy.tcp.trapy import *
 from trapy.tcp.trapy import log
 import trapy.utils as ut 
@@ -7,23 +7,27 @@ import socket
 
 address = '127.0.0.2:6500'
 
-TCP_layer = TCP()
-TCP_layer.start()
+# TCP_layer = TCP()
+# TCP_layer.start()
 
 def server_test():
     server = listen(address)
     client_con = accept(server)
     log.info("Server Done")
-    data_recv = b""
+    data_recv = None
     data = b""
     while True:
-        data = recv(client_con, 2048)
-        data_recv += data
-        if not data:
+        try:
+            data = recv(client_con, 2048)
+        except Exception:
             break
+        log.info(f"Server Recv {data}")
+        if data_recv == None:
+            data_recv = b""
+        data_recv += data
         
-    log.info(f"Info received: {data_recv}")
-    # close(server)
+    log.info(f"Server Received: {data_recv} length:{len(data_recv)}")
+    close(server)
     # log.info("Server Closed")
     # data_sent = b'123456789a123456789b123456789c123456789d123456789e'
     # data_send_len = send(client_con, data_sent)
@@ -39,16 +43,16 @@ def server_test():
     #     log.info(f"Info received: {data_recv}")
     
     
-    close(client_con)
-    log.info("Client Server Closed")
+    # close(client_con)
+    # log.info("Client Server Closed")
     
 def client_test():
     conn = dial(address)
     log.info("Client Done")
-    data = b'123456789a123456789b123456789c' #123456789d123456789e123456789f123456789g123456789h
+    data = b'123456789a123456789b123456789c123456789d123456789e123456789f123456789g123456789h'
     data_send_len = send(conn, data)
     log.info(f"Client Sended: {data_send_len} of {len(data)}")
-    close(conn)    
+    # close(conn)    
     # data_recv = recv(conn, 2048)
     # log.info(f"Info received: {data_recv}")
     # while data_recv:
@@ -59,8 +63,8 @@ def client_test():
     # log.info(f"Server Sended: {data_send_len} of {len(data_sent)}")
     
     
-    # close(conn)
-    # log.info("Client Closed")
+    close(conn)
+    log.info("Client Closed")
 
 def test_1():
     Thread(target=client_test, name='Client').start()

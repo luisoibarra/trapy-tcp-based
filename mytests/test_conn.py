@@ -5,8 +5,9 @@ import unittest
 from mytests import log, Conn
 import mytests.utils as ut
 import time
-from trapy.tcp.trapy2 import send, recv, dial, listen, accept, close, TCP
-from trapy.tcp.tcp2_exc import ConnException
+from trapy.trapy import send, recv, dial, listen, accept, close
+from trapy.tcp.trapy import TCP
+from trapy.tcp.tcp_exc import ConnException
 from concurrent.futures import ThreadPoolExecutor
 
 class TestConn(unittest.TestCase):
@@ -21,7 +22,7 @@ class TestConn(unittest.TestCase):
     
     @classmethod
     def setUpClass(cls):
-        cls.tcp = TCP#()
+        cls.tcp = TCP
         cls.tcp.start()
     
     @classmethod
@@ -157,7 +158,7 @@ class TestConn(unittest.TestCase):
         self.assertEqual(server_task.result(), value, "Data sended and received are different")
     
     def test_file_transfer(self):
-        filename = 'large.txt' 
+        filename = 'small.txt' 
         server_file = f'mytests/data/{filename}'
         client_file = f'mytests/data/tmp-data/{filename}'
         
@@ -222,5 +223,5 @@ class TestConn(unittest.TestCase):
         while server_task.running() or client_task.running():
             time.sleep(0.5)
 
-if __name__ == "__main__":
-    unittest.main(module="mytests.test_conn",defaultTest="TestConn.test_file_transfer")  
+# if __name__ == "__main__":
+#     unittest.main(module="mytests.test_conn",defaultTest="TestConn.test_file_transfer")  
