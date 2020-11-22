@@ -9,8 +9,8 @@ En el proyecto se implementa una virtualización de la capa de transporte basada
 ## Implementa
 
     - Demltiplexing
-    - Verificación de paquete corruptos
-    - Control del tiempo de espera en el enviado de los paquetes
+    - Verificación de paquetes corruptos
+    - Control del tiempo de espera en el envío de los paquetes
     - Control de Flujo
     - Control de Congestión (Slow Start)
 
