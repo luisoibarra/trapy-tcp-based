@@ -158,7 +158,7 @@ class TestConn(unittest.TestCase):
         self.assertEqual(server_task.result(), value, "Data sended and received are different")
     
     def test_file_transfer(self):
-        filename = 'medium.txt' 
+        filename = 'large.txt' 
         server_file = f'mytests/data/{filename}'
         client_file = f'mytests/data/tmp-data/{filename}'
         

@@ -2,9 +2,6 @@ from trapy.tcp.tcp import TCP
 from trapy.tcp.tcp_conn import Conn
 from trapy.tcp.tcp_exc import ConnException
 
-# TCP = TCP("127.0.0.2")
-# TCP.start()
-
 def listen(address: str) -> Conn:
     """
     prepara una conexión que acepta los paquetes enviados a `address`.

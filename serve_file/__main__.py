@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import sys
 sys.path.append(sys.path[0] + "/..")
 from trapy.trapy import listen, accept, dial, recv, send, close
+from trapy.tcp.tcp import TCP
 import time
 
 # uncomment to use working implementation as example
@@ -36,6 +37,9 @@ def handle(conn, file_path, chunk_size):
 def make_server(address, file_path, chunk_size):
     logger.info('server running')
 
+    tcp = TCP()
+    tcp.start()
+    
     executor = ThreadPoolExecutor()
     connections = []
 
@@ -57,8 +61,11 @@ def make_server(address, file_path, chunk_size):
     executor.shutdown(True)
 
 
-def make_client(address, file_path):
+def make_client(address, file_path, chunk_size):
     logger.info('client running')
+
+    tcp = TCP()
+    tcp.start()
 
     conn = dial(address)
 
@@ -66,7 +73,7 @@ def make_client(address, file_path):
 
     data = []
     while True:
-        chunk = recv(conn, 1024)
+        chunk = recv(conn, chunk_size)
 
         if len(chunk) == 0:
             break
@@ -87,7 +94,7 @@ def main():
     args = make_argumentparser().parse_args()
 
     if args.dial:
-        make_client(args.dial, args.file)
+        make_client(args.dial, args.file, args.chunk_size)
     elif args.accept:
         make_server(args.accept, args.file, args.chunk_size)
     else:
@@ -115,7 +122,8 @@ def make_argumentparser():
     parser.add_argument(
         '--chunk-size',
         default=1024,
-        help='file chunks sizes (for server)'
+        help='file chunks sizes (for server)',
+        type=int
     )
 
     return parser

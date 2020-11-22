@@ -91,7 +91,8 @@ class TCP:
         while self.__running:
             data = self.recv_sock.recv(2048)
             package = TCPPackage(data)
-            if self._can_queue_data(package):
+            package = self._can_queue_data(package):
+            if package:
                 log.info(f"TCP recv package: {package._info()}")
                 conn = self.conn_dict.get(package.dest_host, package.dest_port,
                                           package.source_host, package.source_port)
@@ -102,8 +103,8 @@ class TCP:
                     conn = server_conn.server_handle_pkg(package)
                     if conn:
                         TCP.add_connection(conn)
-                elif not package.rst_flag: # When several TCP instances are running comment this
-                    self._send_no_conn_reply(package)
+                # elif not package.rst_flag: # When several TCP instances are running comment this
+                #     self._send_no_conn_reply(package)
                 
     @staticmethod
     def start_server(address:str) -> Conn:
@@ -174,19 +175,15 @@ class TCP:
             time.sleep(0.1)
         return data
     
-    def _can_queue_data(self, pkg:TCPPackage):
+    def _can_queue_data(self, pkg:TCPPackage) -> TCPPackage:
         """
-        returns if the `pkg` must be queued
+        returns the `TCPPackage` to be handled by the connections from `pkg`
         """
-        # if pkg.syn_flag and pkg.ack_flag and not pkg.data: # Simulate data lost
-        #     return False
-        # if pkg.only_ack:
-        #     return random.choice([True, False]) # Simulate unreliable transport medium
-        #     return False
-        # if pkg.no_flag:
-        #     return random.choice([True, False]) # Simulate unreliable transport medium
-        return not pkg.corrupted
-        # return random.choice([True, False]) # Simulate unreliable transport medium
+        # if random.choice([True, False]): # Simulate unreliable transport medium
+        #     return pkg
+        # return None
+        if not pkg.corrupted:
+            return pkg
     
     def _send_no_conn_reply(self, package:TCPPackage):
         """

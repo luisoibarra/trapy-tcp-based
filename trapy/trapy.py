@@ -5,6 +5,7 @@ from trapy.tcp.trapy import dial   as tcp_dial
 from trapy.tcp.trapy import send   as tcp_send
 from trapy.tcp.trapy import recv   as tcp_recv
 from trapy.tcp.trapy import close  as tcp_close
+from trapy.tcp.tcp import TCP
 
 def listen(address: str) -> Conn:
     """

@@ -1,6 +1,7 @@
 from trapy.tcp.tcp_pkg import TCPPackage
 from trapy.tcp.tcp_log import log
 from trapy.tcp.tcp_exc import ConnException
+from trapy.tcp.decorators import raise_error
 import trapy.tcp.tcp_exc as exc
 from concurrent.futures import ThreadPoolExecutor, Future
 from threading import Lock
@@ -23,6 +24,7 @@ class Sender:
     INIT_SS_THRESH = 64 * 8 * 1024 # Recommended 64KB  Slow Start Threshold 
     INIT_RWS = 256 * 256 - 1 # Size of connection buffer. Space left in the rcv buffer 
     RWS_SCALE = 2 # Scale factor of rws => bytes amount in buffer is INIT_RWS * RWS_SCALE
+    MAX_WAITING_TIME = 128 # Max waiting time     
     
     def __init__(self, conn:"Conn", **kwargs):
         self.__executor = ThreadPoolExecutor(1, thread_name_prefix=conn._info())
@@ -44,6 +46,7 @@ class Sender:
         self.to_send_queue = [] # data to send may be TCPPackage or bytes
         self.__running = False
         self.sender_task = None
+        self.sender_error = []
     
     @property
     def timeout_duration(self):
@@ -72,6 +75,7 @@ class Sender:
         self.timer = Timer(self.timeout)
         self.fast_retr = dict() # ack -> times recv
         self.ack_sent = dict() # expected ack for pkg sent -> (time,count)       
+        self.sender_error = []
         self.finished = False
         self.__running = True
         self.data = data
@@ -93,6 +97,9 @@ class Sender:
                 time.sleep(0.05)
             
             if self.timer.timeout():
+                if self.timer._duration > self.MAX_WAITING_TIME:
+                    self.sender_error.append("Wait time reached max value")
+                    break
                 self.next_to_send = self.base
                 self.timer.stop()
                 if self.rws: # Space in recv buffer
@@ -119,6 +126,7 @@ class Sender:
             self.ack_sent = dict() # expected ack for pkg sent -> (time,count)   
             self.pkg_sending = pkg
             self.finished = False
+            self.sender_error = []
             self.__running = True       
             self.sender_task = self.__executor.submit(self.__send_pkg, pkg)
             return self.sender_task
@@ -136,6 +144,9 @@ class Sender:
                 time.sleep(0.05)
             
             if self.timer.timeout():
+                if self.timer._duration > self.MAX_WAITING_TIME:
+                    self.sender_error.append("Wait time reached max value")
+                    break
                 self.timer.stop()
                 self.timer.set_duration(self.timer._duration * 2) # Timeout double the interval
                 log.info(f"TIMEOUT {pkg._endpoint_info()} {self.timer._duration}")
@@ -304,7 +315,7 @@ class Conn:
     CLOSED = "CLOSED" # Endpoint closed
     
     MAX_BUFFER_SIZE = Sender.INIT_RWS * Sender.RWS_SCALE # Max number of bytes allowed in out buffer
-    FIN_WAITING = 5 # Time to wait for connection to close
+    FIN_WAITING = 5 # 60 # Recommended Time to wait for connection to close
     FLOW_WAITING = 2 # Interval of time between flow control ack
     
     def __init__(self, local_host:str, local_port:int, dest_host:str, dest_port:int, tcp_layer):
@@ -333,10 +344,15 @@ class Conn:
         else:
             raise ConnException(exc.ACCEPT_IN_NON_SERVER_MSG)
     
+    @raise_error
     def init_connection(self):
         syn_pkg = self._build_pkg(b"",ut.PacketFlags(False, False, True, False, False, False, False, False))
         self.state = Conn.SYN_SENT
         self.sender.schedule(syn_pkg)
+    
+    @property
+    def errors(self) -> list:
+        return self.sender.sender_error if self.sender else []
     
     @property
     def is_server(self) -> bool:
@@ -383,6 +399,7 @@ class Conn:
             if pkg.fin_flag:
                 self._handle_fin(pkg)
     
+    @raise_error
     def dump(self, length:int):
         with self.__dump_buffer_lock:
             if self.dump_buffer == None:
@@ -401,6 +418,7 @@ class Conn:
             self._start_flow_ack()
         return data
     
+    @raise_error
     def send(self, data:bytes)->int:
         init_len = len(data)
         if not len(data):
@@ -416,6 +434,7 @@ class Conn:
             if self.accepted_conns:
                 return self.accepted_conns.pop(0)
     
+    @raise_error
     def close(self):
         if self.state == Conn.CLOSED:
             raise ConnException(exc.CON_ALREADY_CLOSED_MSG)

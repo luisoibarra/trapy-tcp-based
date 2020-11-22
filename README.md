@@ -1,52 +1,64 @@
 # Trapy
 
-> Mi Nombre Es La Tiza (ymicorret@mbien.com)
+> Luis Ernesto Ibarra Vázquez (luis.ibarra@estudiantes.matcom.uh.cu)
 
-Mi proyecto por supuesto que es la tiza.
+## Descripción
 
-## Recomendaciones
+En el proyecto se implementa una virtualización de la capa de transporte basada en TCP  
 
-### Editor de texto
+## Implementa
 
-Se recomienda utilizar `VSCode`.
+    - Demltiplexing
+    - Verificación de paquete corruptos
+    - Control del tiempo de espera en el enviado de los paquetes
+    - Control de Flujo
+    - Control de Congestión (Slow Start)
 
-### *Virtual Environment*.
+## Usos
 
-Instalar un ambiente virtual que contenga las dependencias de su proyecto.
+Importar las funciones siguientes y usarlas como les sea necesario
+```python
+from trapy.trapy import listen, accept, dial, send, recv, close
+```
+
+Para el correcto uso de la aplicación es necesario tener **una** instancia de la clase TCP activa **por proceso**.
+```python
+from trapy.trapy import TCP
+
+tcp_virtual_layer = TCP() # Mantener una sola instancia de la clase corriendo por proceso
+```  
+
+Para ejemplos básicos de su uso puede referirse a *usage.py*
+
+## Test y pruebas
+
+Puede probar la transferencia de archivos y su uso entre procesos usando el módulo *serve_file*
+con los siguientes comandos:  
+
+Para crear los archivos a copiar:
 
 ```bash
-virutualenv --python=python3.7 venv
+./mycreate_data.sh
 ```
 
-Para activar el *virtual environment*
+Para correr el server:
 
 ```bash
-. venv/bin/activate
+sudo python3 -m serve_file --accept 127.0.0.1:6500 --file mytests/data/large.txt --chunk-size 65000
 ```
 
-Para desactivarlo
+Para correr el cliente:
 
 ```bash
-deactivate
+sudo python3 -m serve_file --dial 127.0.0.1:6500 --file mytests/tmp-data/large.txt --chunk-size 65000
 ```
 
-`VSCode` se integra correctamente con este tipo de flujo de trabajo, usando la
-extensión [ms-python.python](https://marketplace.visualstudio.com/items?itemName=ms-python.python).
-
-### *Linters*
-
-Utilizar un *linter* que valide estáticamente su código. Se recomienda utilizar
-`flake8`.
+Para correr los unittest:
 
 ```bash
-pip install flake8
+sudo python3 -m unittest discover mytests
 ```
 
-En la configuración de `VSCode` puede utilizar
+## Otros usos
 
-```json
-{
-    "python.linting.flake8Enabled": true,
-    "python.linting.enabled": true
-}
-```
+Para probar diferentes escenarios puede en los que se simule perdida de paquete, reordenamiento de estos, entre otros puede sobreescribir el método *_can_queue_data* de *TCP*.
