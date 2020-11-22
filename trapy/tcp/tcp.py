@@ -50,9 +50,9 @@ class TCP:
     # All TCP connections
     conn_dict = ConnectionDict()
     
-    def __init__(self, *args, **kwargs):
-        # self.recv_sock.bind(('',0)) # Receive all connections 
-        self.recv_sock.bind(('127.0.0.2',0)) # TODO Non Production Bind Address
+    def __init__(self, host:str="", *args, **kwargs):
+        # self.recv_sock.bind(('',0)) # Receive all connections
+        self.recv_sock.bind((host,0))
         self.__running = False
 
     def start(self):
@@ -65,9 +65,18 @@ class TCP:
             self.recv_thread = Thread(target=self.demultiplex, name='TCP', daemon=True)
             self.recv_thread.start()
             log.info("TCP Started")
-        
+    
+    def wait(self):
+        """
+        Wait for TCP to stop running
+        """
+        while self.__running:
+            time.sleep(2)
     
     def end(self):
+        """
+        Release all TCP resources and close all connections
+        """
         if self.__running:
             self.close_all()
             self.__running = False
@@ -93,7 +102,7 @@ class TCP:
                     conn = server_conn.server_handle_pkg(package)
                     if conn:
                         TCP.add_connection(conn)
-                elif not package.rst_flag:
+                elif not package.rst_flag: # When several TCP instances are running comment this
                     self._send_no_conn_reply(package)
                 
     @staticmethod

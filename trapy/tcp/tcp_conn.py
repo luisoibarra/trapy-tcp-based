@@ -21,8 +21,8 @@ class Sender:
     DEV_ERRT_WEIGHT = 0.25 # Recommended
     INIT_CWS = 1 * MSS # Recommended Initial sender window size measured in MSS 
     INIT_SS_THRESH = 64 * 8 * 1024 # Recommended 64KB  Slow Start Threshold 
-    INIT_RWS = 2048 # Size of connection buffer. Space left in the rcv buffer 
-    RWS_SCALE = 1 # Scale factor of rws => bytes amount in buffer is INIT_RWS * RWS_SCALE
+    INIT_RWS = 256 * 256 - 1 # Size of connection buffer. Space left in the rcv buffer 
+    RWS_SCALE = 2 # Scale factor of rws => bytes amount in buffer is INIT_RWS * RWS_SCALE
     
     def __init__(self, conn:"Conn", **kwargs):
         self.__executor = ThreadPoolExecutor(1, thread_name_prefix=conn._info())
@@ -81,8 +81,8 @@ class Sender:
     
     def __send(self):
         while self.__running and self.base < len(self.data):
-            window_size = min(min(self.cws, self.rws), len(self.data))
-            while self.next_to_send < self.base + window_size:
+            last_to_send = min(len(self.data), self.base + min(self.cws, self.rws))
+            while self.next_to_send < last_to_send:
                 pkg_sent = self._build_and_send_pkg(self.next_to_send)
                 self.next_to_send += len(pkg_sent.data)
             
@@ -148,6 +148,7 @@ class Sender:
         Build and send a `TCPPackage` indexed in `index`
         """
         if self.data:
+            length = len(self.data)
             to_send = self.data[index:index+self.pkg_size]
             pkg = TCPPackage.construct_data_pkg(to_send, self.__conn.local_host, 
                                                 self.__conn.local_port, self.__conn.dest_host,
@@ -192,7 +193,7 @@ class Sender:
         self.rws = rcv_window_size * self.RWS_SCALE
 
     def __send_pkg_raw(self, pkg:TCPPackage):
-        log.info(f"SENT {pkg._info()}")
+        log.info(f"SENT LEN:{len(pkg.data)} {pkg._info()}")
         self._set_expecting_ack(pkg.expected_ack)
         self.sock.sendto(pkg.to_bytes(), (pkg.dest_host, pkg.dest_port))
         
@@ -329,6 +330,8 @@ class Conn:
             self.state = Conn.LISTEN
             self.accepted_conns = []
             self.accept_count = 0
+        else:
+            raise ConnException(exc.ACCEPT_IN_NON_SERVER_MSG)
     
     def init_connection(self):
         syn_pkg = self._build_pkg(b"",ut.PacketFlags(False, False, True, False, False, False, False, False))
@@ -486,13 +489,14 @@ class Conn:
             elif self.dump_number <= pkg.seq_number <= self.dump_number + len(self.dump_buffer) < pkg.seq_number + len(pkg.data): # The pkg data has data to get into the dump_buffer
                 self.dump_buffer += pkg.data[self.dump_number + len(self.dump_buffer) - pkg.seq_number:]
             
-            if len(self.dump_buffer) > self.MAX_BUFFER_SIZE:
-                self.dump_buffer = self.dump_buffer[:self.MAX_BUFFER_SIZE]
-            
-            self.ack_number += len(self.dump_buffer) - init_buf_len if pkg.data else 1 # Plus 1 in case of no data to ack the pkg
-            
-            if not self.window_size: # Buffer is full
-                self._start_flow_ack()
+            if self.dump_buffer != None and self.ack_number == pkg.seq_number:
+                if len(self.dump_buffer) > self.MAX_BUFFER_SIZE:
+                    self.dump_buffer = self.dump_buffer[:self.MAX_BUFFER_SIZE]
+                
+                self.ack_number += len(self.dump_buffer) - init_buf_len if pkg.data else 1 # Plus 1 in case of no data to ack the pkg
+                
+                if not self.window_size: # Buffer is full
+                    self._start_flow_ack()
     
     def _start_flow_ack(self):
         if not self.__no_window_size_executor:

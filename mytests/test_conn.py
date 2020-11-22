@@ -22,7 +22,7 @@ class TestConn(unittest.TestCase):
     
     @classmethod
     def setUpClass(cls):
-        cls.tcp = TCP
+        cls.tcp = TCP("127.0.0.2")
         cls.tcp.start()
     
     @classmethod
@@ -158,11 +158,11 @@ class TestConn(unittest.TestCase):
         self.assertEqual(server_task.result(), value, "Data sended and received are different")
     
     def test_file_transfer(self):
-        filename = 'small.txt' 
+        filename = 'medium.txt' 
         server_file = f'mytests/data/{filename}'
         client_file = f'mytests/data/tmp-data/{filename}'
         
-        def send_test(pkg_size=1024):
+        def send_test(pkg_size=1024 * 1024):
             self.server = listen(self.address)
             self.server_con = accept(self.server)
             size = pkg_size
@@ -177,7 +177,7 @@ class TestConn(unittest.TestCase):
         def rcv_test():
             self.client_con = dial(self.address)
             rcv_data = True
-            recv_size = 1024
+            recv_size = 1024 * 1024
             with open(client_file, 'wb') as f:
                 while rcv_data:
                     rcv_data = recv(self.client_con, recv_size)
@@ -223,5 +223,5 @@ class TestConn(unittest.TestCase):
         while server_task.running() or client_task.running():
             time.sleep(0.5)
 
-# if __name__ == "__main__":
-#     unittest.main(module="mytests.test_conn",defaultTest="TestConn.test_file_transfer")  
+if __name__ == "__main__":
+    unittest.main(module="mytests.test_conn",defaultTest="TestConn.test_file_transfer")  

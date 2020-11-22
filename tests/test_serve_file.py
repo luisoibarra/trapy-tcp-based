@@ -15,8 +15,10 @@ from tests.utils import file_hashes, is_port_open, wait_for
 
 class TestServeFile(unittest.TestCase):
     def setUp(self):
-        os.makedirs('tests/data/tmp-data')
-
+        try:
+            os.makedirs('tests/data/tmp-data')
+        except FileExistsError:
+            pass
         setLogLevel(config.MININET_LOG_LEVEL)
         self.topo = SingleSwitchTopo(n=2)
         self.net = Mininet(topo=self.topo, host=CPULimitedHost, link=TCLink)
@@ -34,7 +36,7 @@ class TestServeFile(unittest.TestCase):
             '{} -mserve_file --accept {} --file {} &'
             .format(config.PYTHON, address, server_file)
         )
-        wait_for(partial(is_port_open, address, h1))
+        # wait_for(partial(is_port_open, address, h1))
         h2.cmdPrint(
             '{} -mserve_file --dial {} --file {}'
             .format(config.PYTHON, address, client_file)
